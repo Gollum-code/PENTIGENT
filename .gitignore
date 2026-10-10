@@ -1,0 +1,21 @@
+# 构建产物
+artex.exe
+web/out/
+webui/dist/*
+!webui/dist/.gitkeep
+logs/
+server.log
+server.err.log
+*.exe~
+
+# 前端依赖
+web/node_modules/
+web/.next/
+
+# 临时
+tmp/
+*.tmp
+
+# 系统
+Thumbs.db
+.DS_Store
