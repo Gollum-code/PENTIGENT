@@ -23,6 +23,10 @@ func TestGuardIntegration(t *testing.T) {
 		t.Skipf("需要本地 PostgreSQL: %v", err)
 	}
 	defer database.Close()
+	// 建表（幂等）。CI 里是全新库，不迁移会 "relation tasks does not exist"
+	if err := database.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
 
 	tid, err := database.CreateTask(context.Background(), "guard-test", "test", "test", nil)
 	if err != nil {
