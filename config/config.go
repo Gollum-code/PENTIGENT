@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,10 +24,19 @@ type Config struct {
 	Agent struct {
 		Workers  int `json:"workers"`
 		Debounce int `json:"debounce_ms"`
+		// MockWriteProbe 允许 mock LLM 对目标发写操作(POST)探测（默认关闭）
+		MockWriteProbe bool `json:"mock_write_probe"`
 	} `json:"agent"`
 	LLM struct {
 		Profile string `json:"profile"`
 	} `json:"llm"`
+	// Tools 工具执行行为
+	Tools struct {
+		// UserAgent 探测请求的 UA（空=用默认 artex-pentest/1.0）
+		UserAgent string `json:"user_agent"`
+		// BashTimeoutSec bash 单次执行超时（秒，默认 30）
+		BashTimeoutSec int `json:"bash_timeout_sec"`
+	} `json:"tools"`
 	Log struct {
 		// File 日志路径；空则只输出 stdout
 		File string `json:"file"`
@@ -70,8 +80,10 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	// Windows 编辑器（如记事本）保存 JSON 常带 UTF-8 BOM，会让 json.Unmarshal 失败
+	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
 	if err := json.Unmarshal(b, c); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	return c, nil
 }

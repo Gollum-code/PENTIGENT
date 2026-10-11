@@ -12,7 +12,8 @@
   },
   "agent": {
     "workers": 4,
-    "debounce_ms": 500
+    "debounce_ms": 500,
+    "mock_write_probe": false
   },
   "llm": {
     "profile": "default-mock"

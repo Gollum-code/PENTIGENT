@@ -12,6 +12,9 @@ import (
 // 它是"确定性智能体"，按 STATE 块驱动脚本，行为贴近真实渗透流程。
 type MockProvider struct {
 	session map[string]*mockSession // key: explorationID or workerID/nodeID
+	// allowWriteProbe 允许 mock 对目标发写操作(POST)探测。
+	// 默认关闭：写操作是对真实站点的副作用（如登录尝试），需显式开启。
+	allowWriteProbe bool
 }
 
 type mockSession struct {
@@ -29,6 +32,10 @@ type mockStep struct {
 func NewMockProvider() *MockProvider {
 	return &MockProvider{session: map[string]*mockSession{}}
 }
+
+// SetAllowWriteProbe 开启 mock 的写操作探测（POST）。
+// 关闭时验证意图跳过 POST，仅做只读探测。
+func (p *MockProvider) SetAllowWriteProbe(allow bool) { p.allowWriteProbe = allow }
 
 func (p *MockProvider) Name() string { return "mock" }
 
@@ -177,18 +184,21 @@ func (p *MockProvider) Chat(ctx context.Context, req ChatRequest) (ChatResponse,
 	return resp, nil
 }
 
-// estimateTokens 粗略 token 估算
+// estimateTokens 粗略 token 估算：CJK 约 1 字 1 token，ASCII 约 4 字符 1 token
 func estimateTokens(s string) int {
-	total := 0
+	cjk := 0
+	ascii := 0
 	for _, r := range s {
-		if r > 127 {
-			total++
+		if r > 0x2E80 { // CJK 及以上（含中文/日文/全角）按 1 token/字
+			cjk++
 		} else {
-			total++
+			ascii++
 		}
 	}
-	// 中文字符大致 1 token/字，ASCII 4 字符 ≈ 1 token
-	return total/4 + 1
+	if cjk == 0 && ascii == 0 {
+		return 1
+	}
+	return cjk + ascii/4 + 1
 }
 
 // ================= 剧本注册表 =================
@@ -356,6 +366,22 @@ func (p *MockProvider) workStratum(req ChatRequest, st mockState) ChatResponse {
 			{name: "record_fact", args: map[string]any{"summary": "扫描开放端口，识别服务指纹"}},
 		}
 		markDone = "端口与版本探测完成"
+	case strings.Contains(lower, "验证") || strings.Contains(lower, "利用"):
+		// 注意：本分支必须排在 "漏洞" 分支之前 —— 意图标题形如
+		// "验证 X 的漏洞利用链" 同时含"漏洞"与"验证"，先判漏洞会让验证分支变成死代码。
+		script = []planT{
+			{name: "webfetch", args: map[string]any{"url": fmt.Sprintf("https://%s/login", host)}},
+			{name: "record_fact", args: map[string]any{"summary": "针对发现的凭证/端点做可验证测试"}},
+		}
+		// 写操作探测（POST）默认关闭：会对真实站点产生副作用，需显式开启。
+		// 开启时它会触发 ask-write-method 规则 → 进人工审批队列，演示审批门。
+		if p.allowWriteProbe {
+			script = append(script, planT{
+				name: "webfetch",
+				args: map[string]any{"url": fmt.Sprintf("https://%s/login", host), "method": "POST"},
+			})
+		}
+		markDone = "验证链完成"
 	case strings.Contains(lower, "漏洞") || strings.Contains(lower, "web"):
 		scr := pickScript(host)
 		script = []planT{
@@ -372,14 +398,6 @@ func (p *MockProvider) workStratum(req ChatRequest, st mockState) ChatResponse {
 			}},
 		}
 		markDone = "Web 漏洞检查完成"
-	case strings.Contains(lower, "验证") || strings.Contains(lower, "利用"):
-		script = []planT{
-			{name: "webfetch", args: map[string]any{"url": fmt.Sprintf("https://%s/login", host)}},
-			// POST 探测：会触发 ask-write-method 规则 → 进人工审批队列，演示审批门
-			{name: "webfetch", args: map[string]any{"url": fmt.Sprintf("https://%s/login", host), "method": "POST"}},
-			{name: "record_fact", args: map[string]any{"summary": "针对发现的凭证/端点做可验证测试"}},
-		}
-		markDone = "验证链完成"
 	default:
 		// 未知意图 —— 降级为一次安全探测
 		script = []planT{

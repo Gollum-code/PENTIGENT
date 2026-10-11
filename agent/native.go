@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,6 +57,27 @@ func runBash(ctx context.Context, command string) (string, error) {
 	return s, nil
 }
 
+// userAgent 探测请求的 User-Agent。默认暴露工具身份（透明、可审计）。
+// 可通过 SetUserAgent 覆盖为目标站点更可能接受的 UA。
+var userAgent atomic.Value // string
+
+func init() { userAgent.Store("artex-pentest/1.0") }
+
+// SetUserAgent 覆盖默认 UA（传空字符串恢复默认）
+func SetUserAgent(ua string) {
+	if ua == "" {
+		ua = "artex-pentest/1.0"
+	}
+	userAgent.Store(ua)
+}
+
+func currentUserAgent() string {
+	if v, ok := userAgent.Load().(string); ok && v != "" {
+		return v
+	}
+	return "artex-pentest/1.0"
+}
+
 func runWebfetch(ctx context.Context, url, method string) (string, error) {
 	if url == "" {
 		return "", fmt.Errorf("空 url")
@@ -78,7 +100,7 @@ func runWebfetch(ctx context.Context, url, method string) (string, error) {
 	if method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("User-Agent", "artex-pentest/1.0")
+	req.Header.Set("User-Agent", currentUserAgent())
 	client := &http.Client{
 		Timeout: 20 * time.Second,
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {

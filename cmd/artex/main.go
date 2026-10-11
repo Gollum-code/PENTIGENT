@@ -51,8 +51,10 @@ func main() {
 	// LLM provider：按配置选择 mock 或真实 OpenAI
 	switch cfg.LLM.Profile {
 	case "default-off", "default-mock", "", "mock":
-		agent.SetCurrentProvider(agent.NewMockProvider())
-		log.Println("LLM: mock 模式（无 key 闭环演示）")
+		mock := agent.NewMockProvider()
+		mock.SetAllowWriteProbe(cfg.Agent.MockWriteProbe)
+		agent.SetCurrentProvider(mock)
+		log.Printf("LLM: mock 模式（无 key 闭环演示，写操作探测=%v）", cfg.Agent.MockWriteProbe)
 	default:
 		prov := agent.NewOpenAIProvider(cfg.LLM.Profile, "", "")
 		if !prov.HasKey() {
@@ -60,6 +62,11 @@ func main() {
 		}
 		agent.SetCurrentProvider(prov)
 		log.Printf("LLM: %s（OpenAI 兼容，model=%s）", prov.Name(), prov.Model())
+	}
+
+	// 工具执行配置
+	if cfg.Tools.UserAgent != "" {
+		agent.SetUserAgent(cfg.Tools.UserAgent)
 	}
 
 	// HTTP 服务
@@ -70,20 +77,29 @@ func main() {
 		Handler: srv.Handler(),
 	}
 
-	// 优雅关闭
+	// 优雅关闭：先停止接收新请求，再等运行中的任务收敛
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-stop
 		log.Println("收到退出信号，优雅关闭...")
+		// 1) 停止 HTTP 服务，不再接收新请求
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 		_ = httpSrv.Shutdown(ctx)
+		cancel()
+		// 2) 等待运行中的任务自然收敛（给 worker 完成当前工具调用的时间）
+		if n := srv.Engine().RunningCount(); n > 0 {
+			log.Printf("等待 %d 个运行中任务收敛...", n)
+			if left := srv.Engine().WaitAllIdle(30 * time.Second); left > 0 {
+				log.Printf("仍有 %d 个任务未收敛，标记为 stopped（下次启动可断点续跑）", left)
+				srv.Engine().StopAll()
+			}
+		}
+		log.Println("已退出")
 	}()
 
 	log.Printf("HTTP 监听 %s（API: /api/*）", cfg.Server.Addr)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("HTTP 服务失败: %v", err)
 	}
-	log.Println("已退出")
 }

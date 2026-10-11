@@ -81,6 +81,41 @@ func (e *Engine) Stop(taskID int64) {
 	}
 }
 
+// WaitAllIdle 等待所有运行中的任务自然收敛（优雅关闭用）。
+// 给定 timeout，超时后返回仍有运行中的任务数。
+func (e *Engine) WaitAllIdle(timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		e.mu.Lock()
+		n := len(e.running)
+		e.mu.Unlock()
+		if n == 0 {
+			return 0
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.running)
+}
+
+// RunningCount 当前运行中的任务数
+func (e *Engine) RunningCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.running)
+}
+
+// StopAll 停止所有运行中的任务
+func (e *Engine) StopAll() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for id, cancel := range e.running {
+		cancel()
+		delete(e.running, id)
+	}
+}
+
 func (e *Engine) IsRunning(taskID int64) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -222,6 +257,8 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 	}
 
 	// 等待图变更，直到收敛
+	idle := time.NewTimer(e.idleTimeout)
+	defer idle.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -258,19 +295,12 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 				return
 			}
 
-		case <-time.After(e.idleTimeout):
-			// 兜底：长时间无变更信号（worker 异常终止未通知），主动收敛检查
+		case <-idle.C:
+			// 兜底：worker 异常终止未发信号。只做派发与收敛，不调 LLM
+			// （planner 仅在图变更信号到达时唤醒，避免空转烧 token）
 			e.dispatchAsync(ctx, taskID, explorationID, signal)
-			planRes = e.planOnce(ctx, taskID, explorationID)
-			if planRes.GoalProved {
-				_ = e.db.SetExplorationStatus(ctx, explorationID, "done")
-				_ = e.db.SetTaskStatus(ctx, taskID, "done", "")
-				log.Printf("engine: task %d 目标达成", taskID)
-				return
-			}
 		}
-
-		// 收敛判定：planner 没派新意图 && frontier 空 && 无运行中 worker
+		idle.Reset(e.idleTimeout)
 		hasFrontier, _ := e.store.HasOpenIntent(ctx, explorationID)
 		if len(planRes.NewIntents) == 0 && !hasFrontier && e.activeWorkers(taskID) == 0 {
 			allMet, metCount, totalGoals := e.goalsAllMet(ctx, explorationID)
