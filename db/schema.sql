@@ -184,6 +184,63 @@ CREATE TABLE IF NOT EXISTS task_categories (
 );
 
 -- ============================================================================
+-- D2 任务模板（预置渗透场景）
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS task_templates (
+    id           BIGSERIAL PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    description  TEXT NOT NULL DEFAULT '',
+    goal         TEXT NOT NULL,
+    task_desc    TEXT NOT NULL DEFAULT '',
+    scope        TEXT NOT NULL DEFAULT '',  -- 逗号分隔的默认 scope
+    tags         TEXT NOT NULL DEFAULT '',
+    builtin      BOOLEAN NOT NULL DEFAULT FALSE,  -- 内置模板不可删
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS report_settings (
+    id                    BIGSERIAL PRIMARY KEY,
+    org_name              TEXT NOT NULL DEFAULT '',   -- 公司/团队抬头
+    report_title          TEXT NOT NULL DEFAULT '渗透测试报告',
+    logo_url              TEXT NOT NULL DEFAULT '',   -- logo 图片 URL
+    show_assets           BOOLEAN NOT NULL DEFAULT TRUE,
+    show_facts            BOOLEAN NOT NULL DEFAULT FALSE,
+    show_coverage         BOOLEAN NOT NULL DEFAULT TRUE,
+    min_severity          TEXT NOT NULL DEFAULT 'info',  -- 低于此级别不纳入报告
+    confirmed_only        BOOLEAN NOT NULL DEFAULT FALSE, -- 只含已确认漏洞
+    footer                TEXT NOT NULL DEFAULT '',
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 默认报告设置（单行，id=1）
+INSERT INTO report_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- 内置任务模板（幂等插入；scope 留空由用户填目标）
+INSERT INTO task_templates (name, description, goal, task_desc, scope, tags, builtin) VALUES
+('Web 应用渗透',
+ '枚举站点资产、识别技术栈、检查常见 Web 漏洞（SQLi/XSS/弱配置/未授权）',
+ '对该目标做授权的 Web 应用安全测试：资产面测绘 + 常见 Web 漏洞验证 + 风险定级',
+ '仅探测授权范围内的 Web 服务；验证注入/跨站/弱口令/未授权访问等常见漏洞，并输出证据',
+ '', 'web,app,owasp', TRUE),
+('内网横向探测',
+ '子域名与端口发现、服务指纹识别、内网可达性初判',
+ '对授权内网目标做资产面测绘：子域名枚举、端口探测、服务指纹识别',
+ '仅限授权网段；不做破坏性横向；输出资产清单与服务指纹',
+ '', 'network,internal,recon', TRUE),
+('API 安全测试',
+ '识别接口、测试认证缺失/越权/注入/敏感数据暴露',
+ '对该 API 做授权安全测试：接口枚举、认证与授权缺陷、注入与数据暴露验证',
+ '仅测试授权 API；不进行高频压测；输出可复现的漏洞证据',
+ '', 'api,auth,injection', TRUE),
+('口令与认证安全',
+ '弱口令/默认口令检测、认证流程安全、登录接口滥用',
+ '对该系统的认证机制做授权安全评估：弱口令、默认凭据、认证绕过、暴力破解风险',
+ '仅测试授权系统；不做大规模口令喷洒；记录可复现的认证缺陷',
+ '', 'auth,password,credential', TRUE)
+ON CONFLICT (name) DO NOTHING;
+
+-- ============================================================================
 -- E Agent 角色 / 提示词
 -- ============================================================================
 

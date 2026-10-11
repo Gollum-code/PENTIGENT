@@ -30,6 +30,7 @@ function Dashboard() {
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [showReset, setShowReset] = useState(false);
+  const [templates, setTemplates] = useState<any[]>([]);
   const [form, setForm] = useState({ name: "", goal: "", description: "", scope: "" });
   const { setToken, setSetupNeeded } = useAuth();
 
@@ -52,6 +53,9 @@ function Dashboard() {
   useEffect(() => {
     api("/api/health")
       .then((h) => setSetupNeeded(!h.setup))
+      .catch(() => {});
+    api("/api/templates")
+      .then((d) => setTemplates(d.templates || []))
       .catch(() => {});
     // 自动轮询：任务运行状态/发现数实时更新
     const iv = setInterval(() => load(page, statusFilter, search), 3000);
@@ -133,6 +137,33 @@ function Dashboard() {
       {showCreate && (
         <div className="card" style={{ marginTop: 12 }}>
           <h2>新建渗透测试任务</h2>
+          <label>任务模板（一键填入）</label>
+          <select
+            style={{ width: "100%" }}
+            defaultValue=""
+            onChange={async (e) => {
+              const id = e.target.value;
+              if (!id) return;
+              const t: any = templates.find((x: any) => String(x.id) === id);
+              if (t) {
+                setForm({
+                  name: t.name,
+                  goal: form.goal || t.goal,
+                  description: t.task_desc,
+                  scope: t.scope || form.scope,
+                });
+              }
+              e.target.value = "";
+            }}
+          >
+            <option value="">— 选择模板填充 —</option>
+            {templates.map((t: any) => (
+              <option key={t.id} value={t.id}>
+                {t.name}{t.builtin ? "（内置）" : ""} — {t.description}
+              </option>
+            ))}
+          </select>
+          <div style={{ height: 8 }} />
           <label>任务名称</label>
           <input
             value={form.name}

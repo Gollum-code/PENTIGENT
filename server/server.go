@@ -89,6 +89,16 @@ func (s *Server) routes() []route {
 		{Method: "POST", Pattern: "/api/intercept/rules", Handler: s.handleCreateRule, Auth: true},
 		{Method: "DELETE", Pattern: "/api/intercept/rules/:id", Handler: s.handleDeleteRule, Auth: true},
 		{Method: "POST", Pattern: "/api/intercept/:id/decision", Handler: s.handleInterceptDecision, Auth: true},
+
+		// 模板 / 报告设置
+		{Method: "GET", Pattern: "/api/templates", Handler: s.handleListTemplates, Auth: true},
+		{Method: "POST", Pattern: "/api/templates", Handler: s.handleCreateTemplate, Auth: true},
+		{Method: "DELETE", Pattern: "/api/templates/:id", Handler: s.handleDeleteTemplate, Auth: true},
+		{Method: "GET", Pattern: "/api/report-settings", Handler: s.handleGetReportSettings, Auth: true},
+		{Method: "POST", Pattern: "/api/report-settings", Handler: s.handleUpdateReportSettings, Auth: true},
+
+		// API 文档
+		{Method: "GET", Pattern: "/api/openapi.yaml", Handler: s.handleOpenAPI, Auth: false},
 	}
 }
 
@@ -215,16 +225,58 @@ func (s *Server) checkAuth(r *http.Request) bool {
 
 // ---- 健康检查 ----
 
+// handleHealth 健康检查 + 可观测性：DB 连通性、LLM 延迟、运行任务数、待审批积压
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ map[string]string) {
 	prov := agent.CurrentProvider()
+
+	// DB 连通性与延迟
+	dbOK := true
+	var dbMs float64
+	start := time.Now()
+	if err := s.db.Pool().Ping(s.ctx()); err != nil {
+		dbOK = false
+	}
+	dbMs = float64(time.Since(start).Microseconds()) / 1000
+
+	// LLM 连通性与延迟
+	llmOK := true
+	var llmMs float64
+	var llmErr string
+	lstart := time.Now()
+	if _, err := prov.Ping(r.Context()); err != nil {
+		llmOK = false
+		llmErr = err.Error()
+	}
+	llmMs = float64(time.Since(lstart).Microseconds()) / 1000
+
+	// 运行中任务数 / 待审批积压
+	running := s.engine.RunningCount()
+	pendingCount := 0
+	if rows, err := s.db.ListPending(s.ctx(), "pending", 1); err == nil {
+		pendingCount = len(rows)
+		if pendingCount > 0 {
+			if all, _ := s.db.ListPending(s.ctx(), "pending", 1000); len(all) > pendingCount {
+				pendingCount = len(all)
+			}
+		}
+	}
+
+	status := "ok"
+	if !dbOK || !llmOK {
+		status = "degraded"
+	}
+
 	writeJSON(w, 200, map[string]any{
-		"status":        "ok",
+		"status":        status,
 		"version":       "0.1.0",
 		"llm":           prov.Name(),
 		"mock":          prov.Name() == "mock",
 		"setup":         s.isSetup(),
 		"auth_disabled": s.cfg.Auth.Disabled,
 		"time":          time.Now().Format(time.RFC3339),
+		"db":            map[string]any{"ok": dbOK, "latency_ms": dbMs},
+		"llm_status":    map[string]any{"ok": llmOK, "latency_ms": llmMs, "error": llmErr},
+		"engine":        map[string]any{"running_tasks": running, "pending_intercepts": pendingCount},
 	})
 }
 

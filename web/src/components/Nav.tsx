@@ -9,6 +9,7 @@ const links = [
   { href: "/assets", label: "资产" },
   { href: "/findings", label: "发现" },
   { href: "/intercept", label: "审批" },
+  { href: "/settings", label: "设置" },
   { href: "/help", label: "帮助" },
 ];
 
