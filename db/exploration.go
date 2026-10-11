@@ -43,6 +43,44 @@ func (d *DB) ExplorationForTask(ctx context.Context, taskID int64) (int64, error
 	return id, err
 }
 
+// RunHistoryItem 单次运行历史
+type RunHistoryItem struct {
+	ExplorationID int64  `json:"exploration_id"`
+	Goal          string `json:"goal"`
+	Status        string `json:"status"`
+	Nodes         int    `json:"nodes"`
+	Facts         int    `json:"facts"`
+	Findings      int    `json:"findings"`
+	Intents       int    `json:"intents"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
+}
+
+// ListRunHistory 列出任务的所有历史运行（断点续跑/重跑会多次产生探索）
+func (d *DB) ListRunHistory(ctx context.Context, taskID int64) ([]RunHistoryItem, error) {
+	rows, err := d.pool.Query(ctx,
+		`SELECT e.id, e.goal, e.status,
+		   COALESCE((SELECT COUNT(*) FROM exploration_nodes n WHERE n.exploration_id=e.id),0)::int,
+		   COALESCE((SELECT COUNT(*) FROM exploration_nodes n WHERE n.exploration_id=e.id AND n.type='fact'),0)::int,
+		   COALESCE((SELECT COUNT(*) FROM exploration_nodes n WHERE n.exploration_id=e.id AND n.type='finding'),0)::int,
+		   COALESCE((SELECT COUNT(*) FROM exploration_nodes n WHERE n.exploration_id=e.id AND n.type='intent'),0)::int,
+		   e.created_at::text, e.updated_at::text
+		 FROM explorations e WHERE e.task_id=$1 ORDER BY e.id DESC`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RunHistoryItem
+	for rows.Next() {
+		var h RunHistoryItem
+		if err := rows.Scan(&h.ExplorationID, &h.Goal, &h.Status, &h.Nodes, &h.Facts, &h.Findings, &h.Intents, &h.CreatedAt, &h.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 // SetExplorationStatusForTask 把任务最近的探索设为某状态（如 paused）
 func (d *DB) SetExplorationStatusForTask(ctx context.Context, taskID int64, status string) error {
 	eid, err := d.ExplorationForTask(ctx, taskID)

@@ -9,6 +9,12 @@ export default function TaskDetail({ id }: { id: string }) {
   const [events, setEvents] = useState<any[]>([]);
   const [notes, setNotes] = useState("");
   const [notesSaved, setNotesSaved] = useState(false);
+  const [history, setHistory] = useState<any[]>([]);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [selectedNode, setSelectedNode] = useState<number | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const dragRef = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
   const evRef = useRef<HTMLDivElement>(null);
 
   const load = async () => {
@@ -18,6 +24,8 @@ export default function TaskDetail({ id }: { id: string }) {
       setNotes(t.task?.notes || "");
       const g = await api(`/api/tasks/${id}/graph`);
       setGraph(g);
+      const h = await api(`/api/tasks/${id}/history`);
+      setHistory(h.history || []);
     } catch {}
   };
 
@@ -91,13 +99,20 @@ export default function TaskDetail({ id }: { id: string }) {
   const edges = graph.edges || [];
   const colW = 200;
   const typeIdx: any = { goal: 0, intent: 1, fact: 2, finding: 3, hint: 4 };
-  const pos: any = {};
+  const basePos: any = {};
   nodes.forEach((n: any) => {
     const c = typeIdx[n.type] ?? 1;
     const same = nodes.filter((x: any) => x.type === n.type);
     const r = same.indexOf(n);
-    pos[n.id] = { x: c * colW + 20, y: r * 56 + 30 };
+    basePos[n.id] = { x: c * colW + 20, y: r * 56 + 30 };
   });
+  // 应用缩放/平移
+  const pos: any = {};
+  nodes.forEach((n: any) => {
+    const b = basePos[n.id];
+    if (b) pos[n.id] = { x: b.x * zoom + pan.x, y: b.y * zoom + pan.y };
+  });
+  const sel = selectedNode != null ? nodes.find((n: any) => n.id === selectedNode) : null;
 
   return (
     <div className="app">
@@ -139,10 +154,69 @@ export default function TaskDetail({ id }: { id: string }) {
           </div>
         </div>
       )}
+      {history.length > 0 && (
+        <div className="card">
+          <h2>运行历史（{history.length} 轮）</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>轮次</th>
+                <th>状态</th>
+                <th>节点</th>
+                <th>意图</th>
+                <th>事实</th>
+                <th>漏洞</th>
+                <th>开始</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((h, idx) => (
+                <tr key={h.exploration_id}>
+                  <td>#{history.length - idx}</td>
+                  <td>
+                    <span className="tag gray">{h.status}</span>
+                  </td>
+                  <td>{h.nodes}</td>
+                  <td>{h.intents}</td>
+                  <td>{h.facts}</td>
+                  <td>{h.findings}</td>
+                  <td className="muted">{String(h.created_at).slice(0, 19)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       <div className="grid2">
         <div className="card">
-          <h2>探索图（{nodes.length} 节点 / {edges.length} 边）</h2>
-          <svg className="graph-svg" width="100%" height={Math.max(300, nodes.length * 30)} viewBox="0 0 1000 600">
+          <div className="status-row">
+            <h2 style={{ flex: 1 }}>探索图（{nodes.length} 节点 / {edges.length} 边）</h2>
+            <button className="btn ghost" onClick={() => setZoom((z) => Math.max(0.5, z - 0.2))}>−</button>
+            <span className="muted">{Math.round(zoom * 100)}%</span>
+            <button className="btn ghost" onClick={() => setZoom((z) => Math.min(2, z + 0.2))}>+</button>
+            <button className="btn ghost" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}>重置</button>
+          </div>
+          <svg
+            className="graph-svg"
+            width="100%"
+            height={360}
+            style={{ cursor: dragging ? "grabbing" : "grab", border: "1px solid #30363d", borderRadius: 6 }}
+            onMouseDown={(e) => {
+              dragRef.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
+              setDragging(true);
+            }}
+            onMouseMove={(e) => {
+              if (dragRef.current) {
+                setPan({
+                  x: dragRef.current.px + (e.clientX - dragRef.current.x),
+                  y: dragRef.current.py + (e.clientY - dragRef.current.y),
+                });
+              }
+            }}
+            onMouseUp={() => { dragRef.current = null; setDragging(false); }}
+            onMouseLeave={() => { dragRef.current = null; setDragging(false); }}
+            onWheel={(e) => setZoom((z) => Math.max(0.5, Math.min(2, z - e.deltaY * 0.001)))}
+          >
             {edges.map((e: any) => {
               const a = pos[e.from_node_id];
               const b = pos[e.to_node_id];
@@ -151,9 +225,22 @@ export default function TaskDetail({ id }: { id: string }) {
             })}
             {nodes.map((n: any) => {
               const p = pos[n.id] || { x: 20, y: 30 };
+              const isSel = selectedNode === n.id;
               return (
-                <g key={n.id} className={`node-${n.type}`} transform={`translate(${p.x},${p.y})`}>
-                  <rect width="140" height="28" rx="6" />
+                <g
+                  key={n.id}
+                  className={`node-${n.type}`}
+                  transform={`translate(${p.x},${p.y})`}
+                  onClick={(e) => { e.stopPropagation(); setSelectedNode(n.id); }}
+                  style={{ cursor: "pointer" }}
+                >
+                  <rect
+                    width="140"
+                    height="28"
+                    rx="6"
+                    stroke={isSel ? "#58a6ff" : "transparent"}
+                    strokeWidth="2"
+                  />
                   <text x="70" y="18" textAnchor="middle">
                     {String(n.type).slice(0, 3)}#{n.id} {String(n.status)}
                   </text>
@@ -161,6 +248,22 @@ export default function TaskDetail({ id }: { id: string }) {
               );
             })}
           </svg>
+          {sel ? (
+            <div className="act-item" style={{ marginTop: 8 }}>
+              <span className="t">#{sel.id}</span>{" "}
+              <span className="tag">{sel.type}</span>{" "}
+              <span className="tag gray">{sel.status}</span>
+              <div style={{ marginTop: 4 }}>{sel.title}</div>
+              {sel.content?.description && (
+                <div className="muted" style={{ marginTop: 4 }}>{sel.content.description}</div>
+              )}
+              <button className="btn ghost" style={{ marginTop: 6 }} onClick={() => setSelectedNode(null)}>
+                关闭
+              </button>
+            </div>
+          ) : (
+            <p className="muted" style={{ marginTop: 6 }}>点击节点查看详情 · 拖动平移 · 滚轮缩放</p>
+          )}
         </div>
         <div className="card">
           <h2>活动流（SSE 实时）</h2>

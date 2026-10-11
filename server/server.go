@@ -75,6 +75,13 @@ func (s *Server) routes() []route {
 		{Method: "DELETE", Pattern: "/api/findings/:id", Handler: s.handleDeleteFinding, Auth: true},
 		{Method: "GET", Pattern: "/api/companies", Handler: s.handleListCompanies, Auth: true},
 		{Method: "GET", Pattern: "/api/tasks/:id/report", Handler: s.handleTaskReport, Auth: true},
+		{Method: "GET", Pattern: "/api/tasks/:id/history", Handler: s.handleTaskHistory, Auth: true},
+		{Method: "GET", Pattern: "/api/export/assets.csv", Handler: s.handleExportAssetsCSV, Auth: true},
+		{Method: "GET", Pattern: "/api/export/findings.csv", Handler: s.handleExportFindingsCSV, Auth: true},
+		{Method: "GET", Pattern: "/api/search", Handler: s.handleGlobalSearch, Auth: true},
+
+		// 漏洞详情
+		{Method: "GET", Pattern: "/api/findings/:id", Handler: s.handleGetFinding, Auth: true},
 
 		// 审批
 		{Method: "GET", Pattern: "/api/intercept/pending", Handler: s.handlePendingList, Auth: true},

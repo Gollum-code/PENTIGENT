@@ -102,10 +102,82 @@ func (d *DB) SetFindingStatus(ctx context.Context, id int64, status string) erro
 	return err
 }
 
+// SearchFindings 按标题模糊搜索漏洞（全局搜索用）
+func (d *DB) SearchFindings(ctx context.Context, q string, limit int) ([]Finding, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := d.pool.Query(ctx,
+		`SELECT f.id, f.task_id, COALESCE(t.name,'') AS task_name, f.exploration_id, f.node_id, f.asset_id,
+		        f.title, f.severity, f.status, f.evidence, f.created_at::text
+		 FROM findings f LEFT JOIN tasks t ON t.id=f.task_id
+		 WHERE f.title ILIKE $1
+		 ORDER BY f.id DESC LIMIT $2`, "%"+q+"%", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Finding
+	for rows.Next() {
+		var f Finding
+		if err := rows.Scan(&f.ID, &f.TaskID, &f.TaskName, &f.ExplorationID, &f.NodeID, &f.AssetID,
+			&f.Title, &f.Severity, &f.Status, &f.Evidence, &f.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
 // DeleteFinding 删除单个漏洞记录
 func (d *DB) DeleteFinding(ctx context.Context, id int64) error {
 	_, err := d.pool.Exec(ctx, `DELETE FROM findings WHERE id=$1`, id)
 	return err
+}
+
+// FindingDetail 漏洞详情：含关联资产、发现它的意图节点
+type FindingDetail struct {
+	Finding
+	Asset        *Asset `json:"asset,omitempty"`
+	IntentTitle  string `json:"intent_title,omitempty"`
+	IntentID     *int64 `json:"intent_id,omitempty"`
+	TaskGoal     string `json:"task_goal,omitempty"`
+}
+
+// GetFindingDetail 取单条漏洞详情（含证据链：资产 / 发现它的意图）
+func (d *DB) GetFindingDetail(ctx context.Context, id int64) (*FindingDetail, error) {
+	var fd FindingDetail
+	err := d.pool.QueryRow(ctx,
+		`SELECT f.id, f.task_id, COALESCE(t.name,'') AS task_name, f.exploration_id, f.node_id, f.asset_id,
+		        f.title, f.severity, f.status, f.evidence, f.created_at::text
+		 FROM findings f LEFT JOIN tasks t ON t.id=f.task_id
+		 WHERE f.id=$1`, id).
+		Scan(&fd.ID, &fd.TaskID, &fd.TaskName, &fd.ExplorationID, &fd.NodeID, &fd.AssetID,
+			&fd.Title, &fd.Severity, &fd.Status, &fd.Evidence, &fd.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	// 关联资产
+	if fd.AssetID != nil {
+		if a, err := d.GetAsset(ctx, *fd.AssetID); err == nil {
+			fd.Asset = a
+		}
+	}
+	// 发现它的意图（node_id 指向产出该漏洞的 finding 节点，其上游 intent 经边关联）
+	if fd.NodeID != nil {
+		var intentID int64
+		var title string
+		err := d.pool.QueryRow(ctx,
+			`SELECT n.id, n.title FROM exploration_edges e
+			 JOIN exploration_nodes n ON n.id = e.from_node_id
+			 WHERE e.to_node_id=$1 AND e.relation='yields' AND n.type='intent'
+			 LIMIT 1`, *fd.NodeID).Scan(&intentID, &title)
+		if err == nil {
+			fd.IntentID = &intentID
+			fd.IntentTitle = title
+		}
+	}
+	return &fd, nil
 }
 
 // ---- intercept ----

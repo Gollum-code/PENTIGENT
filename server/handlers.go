@@ -288,7 +288,132 @@ func renderMarkdownReport(task *db.Task, scope []db.ScopeItem, findings []db.Fin
 	return b.String()
 }
 
-// ---- 新增端点 ----
+// ---- 漏洞详情 ----
+
+// handleGetFinding 单条漏洞详情（含证据链：资产 / 发现它的意图）
+func (s *Server) handleGetFinding(w http.ResponseWriter, r *http.Request, params map[string]string) {
+	id, err := strconv.ParseInt(params["id"], 10, 64)
+	if err != nil {
+		writeErr(w, 400, "无效 id")
+		return
+	}
+	fd, err := s.db.GetFindingDetail(s.ctx(), id)
+	if err != nil {
+		writeErr(w, 404, "漏洞不存在")
+		return
+	}
+	writeJSON(w, 200, fd)
+}
+
+// ---- 运行历史 ----
+
+// handleTaskHistory 任务的所有运行历史
+func (s *Server) handleTaskHistory(w http.ResponseWriter, r *http.Request, params map[string]string) {
+	id, err := parseID(r, params)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	hist, err := s.db.ListRunHistory(s.ctx(), id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if hist == nil {
+		hist = []db.RunHistoryItem{}
+	}
+	writeJSON(w, 200, map[string]any{"history": hist})
+}
+
+// ---- CSV 导出 ----
+
+// csvEscape 转义 CSV 字段
+func csvEscape(s string) string {
+	if strings.ContainsAny(s, ",\"\n\r") {
+		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	}
+	return s
+}
+
+func writeCSVHeaders(w http.ResponseWriter, filename string) {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	// BOM 让 Excel 正确识别 UTF-8
+	w.Write([]byte{0xEF, 0xBB, 0xBF})
+}
+
+func (s *Server) handleExportAssetsCSV(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+	q := r.URL.Query()
+	var companyID *int64
+	if c := q.Get("company"); c != "" {
+		if v, err := strconv.ParseInt(c, 10, 64); err == nil {
+			companyID = &v
+		}
+	}
+	assets, _, err := s.db.SearchAssets(s.ctx(), companyID, q.Get("type"), q.Get("q"), 10000, 0)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeCSVHeaders(w, "assets.csv")
+	_, _ = fmt.Fprintln(w, "ID,类型,域名,URL,标题")
+	for _, a := range assets {
+		_, _ = fmt.Fprintf(w, "%d,%s,%s,%s,%s\n",
+			a.ID, csvEscape(a.Type), csvEscape(a.Domain), csvEscape(a.URL), csvEscape(a.Title))
+	}
+}
+
+func (s *Server) handleExportFindingsCSV(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+	q := r.URL.Query()
+	var taskID *int64
+	if t := q.Get("task"); t != "" {
+		if v, err := strconv.ParseInt(t, 10, 64); err == nil {
+			taskID = &v
+		}
+	}
+	findings, _, err := s.db.ListFindings(s.ctx(), taskID, q.Get("severity"), q.Get("status"), 10000, 0)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeCSVHeaders(w, "findings.csv")
+	_, _ = fmt.Fprintln(w, "ID,项目,严重性,状态,标题,证据,发现时间")
+	for _, f := range findings {
+		ev := ""
+		if f.Evidence != nil {
+			if u, ok := f.Evidence["url"].(string); ok {
+				ev = u
+			}
+		}
+		_, _ = fmt.Fprintf(w, "%d,%s,%s,%s,%s,%s,%s\n",
+			f.ID, csvEscape(f.TaskName), csvEscape(f.Severity), csvEscape(f.Status),
+			csvEscape(f.Title), csvEscape(ev), csvEscape(f.CreatedAt))
+	}
+}
+
+// ---- 全局搜索 ----
+
+// handleGlobalSearch 跨任务/资产/漏洞的统一搜索
+func (s *Server) handleGlobalSearch(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+	q := r.URL.Query().Get("q")
+	if strings.TrimSpace(q) == "" {
+		writeJSON(w, 200, map[string]any{"tasks": []any{}, "assets": []any{}, "findings": []any{}})
+		return
+	}
+	tasks, _, _ := s.db.ListTasks(s.ctx(), "", q, 10, 0)
+	assets, _, _ := s.db.SearchAssets(s.ctx(), nil, "", q, 10, 0)
+	findings, _ := s.db.SearchFindings(s.ctx(), q, 10)
+	if tasks == nil {
+		tasks = []db.Task{}
+	}
+	if assets == nil {
+		assets = []db.Asset{}
+	}
+	if findings == nil {
+		findings = []db.Finding{}
+	}
+	writeJSON(w, 200, map[string]any{"tasks": tasks, "assets": assets, "findings": findings})
+}
 
 // handleFindingStatus 更新漏洞状态（confirmed / dismissed 误报）
 func (s *Server) handleFindingStatus(w http.ResponseWriter, r *http.Request, params map[string]string) {

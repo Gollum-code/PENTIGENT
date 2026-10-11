@@ -56,6 +56,15 @@ export default function Findings() {
     if (d) load(page);
   };
 
+  // 导出 CSV 时带上当前筛选条件
+  const buildFindingsQuery = () => {
+    const p = new URLSearchParams();
+    if (sev) p.set("severity", sev);
+    if (status) p.set("status", status);
+    const s = p.toString();
+    return s ? `?${s}` : "";
+  };
+
   return (
     <div className="app">
       <Nav />
@@ -104,11 +113,19 @@ export default function Findings() {
                     {f.status === "confirmed" ? "已确认" : "误报"}
                   </span>
                 </td>
-                <td>{f.title}</td>
+                <td>
+                  <Link href={`/findings/${f.id}/`}>{f.title}</Link>
+                </td>
                 <td>
                   <button className="btn ghost" onClick={() => toggleStatus(f)}>
                     {f.status === "dismissed" ? "重新确认" : "标记误报"}
                   </button>
+                  <a
+                    className="btn ghost"
+                    href={`/api/export/findings.csv${buildFindingsQuery()}`}
+                  >
+                    导出CSV
+                  </a>
                   <button className="btn danger" onClick={() => remove(f)}>
                     删除
                   </button>
