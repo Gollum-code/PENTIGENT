@@ -1,9 +1,9 @@
-# ARTEX MVP - live end-to-end test (Windows PowerShell)
+﻿# PENTIGENT MVP - live end-to-end test (Windows PowerShell)
 # Usage:  .\e2e-test.ps1
-# Requires: artex.exe running on http://127.0.0.1:8080
+# Requires: pentigent.exe running on http://127.0.0.1:8080
 
 $ErrorActionPreference = "Stop"
-$base = if ($env:ARTEX_BASE) { $env:ARTEX_BASE } else { "http://127.0.0.1:8080" }
+$base = if ($env:PENTIGENT_BASE) { $env:PENTIGENT_BASE } else { "http://127.0.0.1:8080" }
 $pass = 0; $fail = 0
 function Check($name, $cond) {
   if ($cond) { $script:pass++; Write-Output "  [PASS] $name" }

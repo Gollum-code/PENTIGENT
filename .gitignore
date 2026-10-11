@@ -1,5 +1,5 @@
 # 构建产物
-artex.exe
+pentigent.exe
 web/out/
 webui/dist/*
 !webui/dist/.gitkeep

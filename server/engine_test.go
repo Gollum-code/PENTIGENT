@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"artex/db"
+	"pentigent/db"
 )
 
 // helper：跑一个完整任务直到收敛

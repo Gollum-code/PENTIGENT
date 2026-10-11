@@ -9,12 +9,12 @@ import (
 	"syscall"
 	"time"
 
-	"artex/agent"
-	"artex/config"
-	"artex/db"
-	"artex/logging"
-	"artex/server"
-	"artex/webui"
+	"pentigent/agent"
+	"pentigent/config"
+	"pentigent/db"
+	"pentigent/logging"
+	"pentigent/server"
+	"pentigent/webui"
 )
 
 func configPath() string {

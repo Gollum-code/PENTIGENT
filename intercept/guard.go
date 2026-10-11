@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"artex/db"
+	"pentigent/db"
 )
 
 // Guard 审批门：规则匹配 + 资产硬边界

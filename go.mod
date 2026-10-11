@@ -1,4 +1,4 @@
-module artex
+module pentigent
 
 go 1.27
 

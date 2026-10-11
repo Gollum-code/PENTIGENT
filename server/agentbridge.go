@@ -6,9 +6,9 @@ import (
 	"regexp"
 	"strings"
 
-	"artex/agent"
-	"artex/db"
-	"artex/intercept"
+	"pentigent/agent"
+	"pentigent/db"
+	"pentigent/intercept"
 )
 
 // agentGoalsRun 调用 goals agent 做目标分解 + 约束提取

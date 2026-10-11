@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"artex/agent"
-	"artex/db"
-	"artex/intercept"
+	"pentigent/agent"
+	"pentigent/db"
+	"pentigent/intercept"
 )
 
 // Engine 事件驱动闭环：图变更 → debounce → planner → frontier → N workers → 写回 → 再唤醒

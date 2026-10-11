@@ -5,16 +5,16 @@ import (
 	"os"
 	"testing"
 
-	"artex/db"
+	"pentigent/db"
 )
 
 // 用临时 PostgreSQL 测试 guard 集成行为。
-// DSN 可用 ARTEX_TEST_DSN 覆盖（CI 里指向 service 容器）。
+// DSN 可用 PENTIGENT_TEST_DSN 覆盖（CI 里指向 service 容器）。
 func testDSN() string {
-	if v := os.Getenv("ARTEX_TEST_DSN"); v != "" {
+	if v := os.Getenv("PENTIGENT_TEST_DSN"); v != "" {
 		return v
 	}
-	return "postgres://postgres:postgres@127.0.0.1:5432/artex?sslmode=disable"
+	return "postgres://postgres:postgres@127.0.0.1:5432/pentigent?sslmode=disable"
 }
 
 func TestGuardIntegration(t *testing.T) {

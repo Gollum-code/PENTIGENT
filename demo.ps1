@@ -3,7 +3,7 @@
 # 会自动：登录 → 建示例任务 → 启动 → 轮询到结束 → 打印探索图/资产/漏洞/活动流
 
 $ErrorActionPreference = "Stop"
-$base = if ($env:ARTEX_BASE) { $env:ARTEX_BASE } else { "http://127.0.0.1:8080" }
+$base = if ($env:PENTIGENT_BASE) { $env:PENTIGENT_BASE } else { "http://127.0.0.1:8080" }
 
 # PS 5.1 的 Invoke-RestMethod 默认用 ANSI 编码 body，中文会乱码。
 # 必须把 JSON 转成 UTF-8 字节并用局部变量直接传给 -Body（不能用函数返回值，会被管道重编码）。

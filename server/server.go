@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"artex/agent"
-	"artex/config"
-	"artex/db"
+	"pentigent/agent"
+	"pentigent/config"
+	"pentigent/db"
 
 	"github.com/golang-jwt/jwt/v5"
 )

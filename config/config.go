@@ -32,7 +32,7 @@ type Config struct {
 	} `json:"llm"`
 	// Tools 工具执行行为
 	Tools struct {
-		// UserAgent 探测请求的 UA（空=用默认 artex-pentest/1.0）
+		// UserAgent 探测请求的 UA（空=用默认 pentigent-pentest/1.0）
 		UserAgent string `json:"user_agent"`
 		// BashTimeoutSec bash 单次执行超时（秒，默认 30）
 		BashTimeoutSec int `json:"bash_timeout_sec"`
@@ -49,14 +49,14 @@ type Config struct {
 
 func Default() *Config {
 	c := &Config{}
-	c.Database.DSN = "postgres://postgres:postgres@127.0.0.1:5432/artex?sslmode=disable"
+	c.Database.DSN = "postgres://postgres:postgres@127.0.0.1:5432/pentigent?sslmode=disable"
 	c.SkillDir = "skills"
 	c.Server.Addr = ":8080"
 	c.Auth.JWTSecret = "dev-secret-change-me"
 	c.Agent.Workers = 4
 	c.Agent.Debounce = 500
 	c.LLM.Profile = "default-mock"
-	c.Log.File = "logs/artex.log"
+	c.Log.File = "logs/pentigent.log"
 	c.Log.MaxSizeMB = 32
 	c.Log.MaxBackups = 5
 	return c

@@ -80,7 +80,7 @@ export default function Help() {
           <li><b>任务一直 running</b>：worker 可能卡在网络请求上，5 分钟后会自动回收重跑</li>
           <li><b>状态显示 incomplete</b>：planner 无新方向但目标未全部达成，查看错误信息</li>
           <li><b>无漏洞发现</b>：目标可能安全，或网络不可达；尝试换一个明确的目标</li>
-          <li><b>服务启动失败</b>：查看 <code>logs/artex.log</code>，确认 PostgreSQL 已启动</li>
+          <li><b>服务启动失败</b>：查看 <code>logs/pentigent.log</code>，确认 PostgreSQL 已启动</li>
         </ul>
       </div>
     </div>

@@ -1,6 +1,6 @@
-# ARTEX · AI 渗透测试系统（MVP）
+# PENTIGENT · AI 渗透测试系统（MVP）
 
-复刻 ARTEX 核心架构的 AI 渗透测试系统 MVP：**双图（资产图 + 探索图）+ planner/worker 事件驱动闭环**。
+复刻 PENTIGENT 核心架构的 AI 渗透测试系统 MVP：**双图（资产图 + 探索图）+ planner/worker 事件驱动闭环**。
 
 给一个任务目标和描述，系统自己决定"先干什么、再干什么"，用真实工具（bash / HTTP）探测目标资产，
 把发现写回数据库，直到证明目标达成或没有新方向收敛。
@@ -25,7 +25,7 @@
 ### 2.1 环境依赖
 
 - Go 1.26+（本项目在 go1.27.2 验证）
-- PostgreSQL 16（本项目用安装版，DSN 默认 `postgres://postgres:postgres@127.0.0.1:5432/artex?sslmode=disable`）
+- PostgreSQL 16（本项目用安装版，DSN 默认 `postgres://postgres:postgres@127.0.0.1:5432/PENTIGENT?sslmode=disable`）
 - Node.js 20+（仅构建前端时需；产线只用编译出的单二进制）
 
 ### 2.2 一键启动（Windows）
@@ -51,10 +51,10 @@ npm run build
 cd ..
 
 # 后端单二进制（自动嵌入前端 dist）
-go build -o artex.exe ./cmd/artex
+go build -o PENTIGENT.exe ./cmd/PENTIGENT
 
 # 启动
-.\artex.exe config.json
+.\PENTIGENT.exe config.json
 ```
 
 ### 2.4 接入真实 LLM
@@ -64,7 +64,7 @@ go build -o artex.exe ./cmd/artex
 $env:OPENAI_API_KEY = "sk-xxx"
 $env:OPENAI_BASE_URL = "https://api.openai.com/v1"   # 或 DeepSeek/通义/Kimi 兼容端点
 $env:OPENAI_MODEL = "gpt-4o-mini"
-.\artex.exe config.json
+.\PENTIGENT.exe config.json
 
 # 启动后先做连通性自检（真实 key 才有意义）
 curl -X POST http://127.0.0.1:8080/api/llm/test
@@ -128,7 +128,7 @@ curl -X POST http://127.0.0.1:8080/api/llm/test
   → 再次触发图变更 → 闭环
 ```
 
-两个关键设计（照搬 ARTEX）：
+两个关键设计（照搬 PENTIGENT）：
 1. **planner 跨唤醒共享 todolist**（`explorations.todolist` JSONB）
 2. **worker 间过程级信息交换**：`search_all_worker_traces` / `get_worker_trace`
 
@@ -195,7 +195,7 @@ GET    /api/findings?task=&severity=&limit=50&offset=0 → { findings, total, li
 
 ```
 PENTIGENT/
-├── cmd/artex/main.go         入口
+├── cmd/PENTIGENT/main.go         入口
 ├── config/config.go          配置
 ├── db/
 │   ├── schema.sql            幂等建表（go:embed）
@@ -265,12 +265,12 @@ PENTIGENT/
 | intent 超时回收 | ✅ 已实现 | `ReclaimStuckIntents` 回收崩溃 worker 留下的 running |
 | ask 审批重试 | ✅ 已实现 | worker 有界轮询人工裁决（默认 120s），放行则继续执行 |
 | pause 断点续跑 | ✅ 已实现 | 暂停保留探索，下次 start 恢复未完成 intent |
-| 日志落文件 | ✅ 已实现 | `logging` 包按大小轮转（默认 logs/artex.log） |
+| 日志落文件 | ✅ 已实现 | `logging` 包按大小轮转（默认 logs/PENTIGENT.log） |
 | 资产公司归属 | ✅ 已实现 | 从 task 查真实 company_id，不再硬编码 |
 
-## 10. 与 ARTEX 的差异（有意简化）
+## 10. 与 PENTIGENT 的差异（有意简化）
 
-| 维度 | ARTEX | 本 MVP |
+| 维度 | PENTIGENT | 本 MVP |
 |---|---|---|
 | 状态并发 | 多 goroutine + sync.Map | 单 goroutine actor / 简单锁 |
 | LLM | 双格式 + failover pool + 熔断 | 一个 interface + OpenAI 实现 |

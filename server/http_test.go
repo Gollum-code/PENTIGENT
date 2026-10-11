@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"artex/config"
-	"artex/db"
+	"pentigent/config"
+	"pentigent/db"
 )
 
 func newTestServer(t *testing.T) (*Server, *db.DB) {

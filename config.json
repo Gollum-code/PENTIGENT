@@ -1,6 +1,6 @@
 {
   "database": {
-    "dsn": "postgres://postgres:postgres@127.0.0.1:5432/artex?sslmode=disable"
+    "dsn": "postgres://postgres:postgres@127.0.0.1:5432/pentigent?sslmode=disable"
   },
   "skill_dir": "skills",
   "server": {
@@ -19,7 +19,7 @@
     "profile": "default-mock"
   },
   "log": {
-    "file": "logs/artex.log",
+    "file": "logs/pentigent.log",
     "max_size_mb": 32,
     "max_backups": 5
   }

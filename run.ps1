@@ -62,7 +62,7 @@ if (-not $psql) {
 Write-Output "  psql: $psql"
 $pgBin = Split-Path $psql
 $env:Path = "$pgBin;" + $env:Path
-# 默认本地开发密码（与 config.json 的 dsn 一致：postgres/postgres@127.0.0.1:5432/artex）
+# 默认本地开发密码（与 config.json 的 dsn 一致：postgres/postgres@127.0.0.1:5432/pentigent）
 $env:PGPASSWORD = "postgres"
 
 # 确保服务运行
@@ -71,11 +71,11 @@ if ($svc -and $svc.Status -ne "Running") { Start-Service $svc.Name; Start-Sleep 
 if ($svc) { Write-Output "  服务: $($svc.Name) ($($svc.Status))" }
 
 # 建库（幂等）
-Write-Output "  检查数据库 artex ..."
-$dbExist = & $psql -U postgres -h 127.0.0.1 -t -A -c "SELECT 1 FROM pg_database WHERE datname='artex'" 2>$null
+Write-Output "  检查数据库 pentigent ..."
+$dbExist = & $psql -U postgres -h 127.0.0.1 -t -A -c "SELECT 1 FROM pg_database WHERE datname='pentigent'" 2>$null
 if ($LASTEXITCODE -ne 0 -or [string]$dbExist -ne "1") {
-  & $psql -U postgres -h 127.0.0.1 -c "CREATE DATABASE artex" *> $null
-  if ($LASTEXITCODE -eq 0) { Write-Output "  已创建数据库 artex" }
+  & $psql -U postgres -h 127.0.0.1 -c "CREATE DATABASE pentigent" *> $null
+  if ($LASTEXITCODE -eq 0) { Write-Output "  已创建数据库 pentigent" }
   else { Write-Output "  创建数据库失败（检查 postgres 密码是否为 postgres，或改 config.json 的 dsn）" }
 } else {
   Write-Output "  数据库已存在"
@@ -115,15 +115,15 @@ if (Test-Path "$root\web\package.json") {
 }
 # 后端单二进制
 Write-Output "  [后端] go build ..."
-& $go build -o "$root\artex.exe" ./cmd/artex
+& $go build -o "$root\pentigent.exe" ./cmd/pentigent
 if ($LASTEXITCODE -ne 0) { Write-Output "  后端构建失败"; exit 1 }
-Write-Output "  artex.exe 构建完成 ($([math]::Round((Get-Item "$root\artex.exe").Length/1MB,1)) MB)"
+Write-Output "  pentigent.exe 构建完成 ($([math]::Round((Get-Item "$root\pentigent.exe").Length/1MB,1)) MB)"
 
 # ---------- 5. 启动 ----------
 Write-Step "5/5 启动服务"
-Get-Process -Name artex -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name pentigent -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
-Start-Process -FilePath "$root\artex.exe" -ArgumentList "config.json" -WorkingDirectory $root -WindowStyle Hidden
+Start-Process -FilePath "$root\pentigent.exe" -ArgumentList "config.json" -WorkingDirectory $root -WindowStyle Hidden
 Start-Sleep -Seconds 3
 
 $base = "http://127.0.0.1:8080"
@@ -140,9 +140,9 @@ try {
   Write-Output "下一步："
   Write-Output "  浏览器访问 $base 设管理员密码后即可建任务"
   Write-Output "  或跑在线实测: .\e2e-test.ps1"
-  Write-Output "  停止服务:     Stop-Process -Name artex"
+  Write-Output "  停止服务:     Stop-Process -Name pentigent"
 } catch {
   Write-Output "服务启动失败：$($_.Exception.Message)"
-  Write-Output "请查看日志 logs\artex.log"
+  Write-Output "请查看日志 logs\pentigent.log"
   exit 1
 }

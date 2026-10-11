@@ -1,6 +1,6 @@
 # AI 渗透测试系统 · MVP 规划文档
 
-> 目标：复刻 ARTEX 的核心架构（双图 + planner/worker 事件驱动闭环），
+> 目标：复刻 PENTIGENT 的核心架构（双图 + planner/worker 事件驱动闭环），
 > 做出一套**能自己跑起来**的 MVP 骨架，后续再迭代功能。
 > 技术栈照搬：Go + Next.js + PostgreSQL；LLM 接入 OpenAI 兼容接口。
 
@@ -63,7 +63,7 @@
 
 ---
 
-## 4. 核心设计：双图架构（照搬 ARTEX）
+## 4. 核心设计：双图架构（照搬 PENTIGENT）
 
 ### 4.1 资产图（全局共享 · 真值库）
 
@@ -129,7 +129,7 @@ root_domain → subdomain → service → endpoint
 
 ## 6. 数据库 Schema 规划
 
-照搬 ARTEX 的幂等 schema 风格：全部 `IF NOT EXISTS`，启动时重跑 = "重启即迁移"。
+照搬 PENTIGENT 的幂等 schema 风格：全部 `IF NOT EXISTS`，启动时重跑 = "重启即迁移"。
 
 ### 表清单
 
@@ -172,8 +172,8 @@ endpoint:    UNIQUE(url, method)
 ## 7. 目录结构规划
 
 ```
-artex-mvp/
-├── cmd/artex/main.go        # 入口：HTTP 监听 + 信号处理
+PENTIGENT-mvp/
+├── cmd/PENTIGENT/main.go        # 入口：HTTP 监听 + 信号处理
 ├── config/config.go         # config.json 解析（仅 database + skill_dir）
 ├── db/
 │   ├── schema.sql           # 幂等建表（go:embed）
@@ -317,9 +317,9 @@ GET    /api/health              # 健康检查（版本/LLM 状态）
 
 ---
 
-## 14. 与 ARTEX 的差异（有意简化）
+## 14. 与 PENTIGENT 的差异（有意简化）
 
-| 维度 | ARTEX | 本 MVP |
+| 维度 | PENTIGENT | 本 MVP |
 |---|---|---|
 | 状态并发 | 多 goroutine + 大量 sync.Map | 单 goroutine actor / 简单锁 |
 | LLM 接入 | 双格式 + failover pool + 熔断 | 一个 interface + OpenAI 实现 |

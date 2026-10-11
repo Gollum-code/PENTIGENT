@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"artex/db"
+	"pentigent/db"
 )
 
 // 复用 db 包的类型

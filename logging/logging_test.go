@@ -60,7 +60,7 @@ func TestRotatingFileRotates(t *testing.T) {
 // Setup 应写文件到磁盘；返回的 closer 必须能释放文件句柄
 // （Windows 上不释放会导致日志文件无法删除/轮转）
 func TestSetupWritesToFile(t *testing.T) {
-	dir, err := os.MkdirTemp("", "artex-log-test")
+	dir, err := os.MkdirTemp("", "pentigent-log-test")
 	if err != nil {
 		t.Fatal(err)
 	}
