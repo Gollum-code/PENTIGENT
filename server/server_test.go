@@ -2,15 +2,24 @@ package server
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"artex/config"
 	"artex/db"
 )
 
+// testDSN 测试用 DSN，可用 ARTEX_TEST_DSN 覆盖（CI 指向 service 容器）
+func testDSN() string {
+	if v := os.Getenv("ARTEX_TEST_DSN"); v != "" {
+		return v
+	}
+	return "postgres://postgres:postgres@127.0.0.1:5432/artex?sslmode=disable"
+}
+
 func testDB(t *testing.T) *db.DB {
 	t.Helper()
-	d, err := db.Open(context.Background(), "postgres://postgres:postgres@127.0.0.1:5432/artex?sslmode=disable")
+	d, err := db.Open(context.Background(), testDSN())
 	if err != nil {
 		t.Skipf("需要本地 PostgreSQL: %v", err)
 	}

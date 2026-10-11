@@ -84,10 +84,19 @@ func (r *rotatingFile) Close() error {
 	return nil
 }
 
-// Setup 配置全局 logger：输出到 stdout + 可选的轮转文件
-func Setup(logFile string, maxSizeMB, maxBackups int) {
-	var writers []io.Writer
-	writers = append(writers, os.Stdout)
+// Setup 配置全局 logger：输出到 stdout + 可选的轮转文件。
+// 返回释放函数——必须调用它关闭文件句柄，否则在 Windows 上日志文件
+// 无法被删除或轮转（文件被独占锁定）。
+func Setup(logFile string, maxSizeMB, maxBackups int) func() {
+	var closers []func()
+	release := func() {
+		log.SetOutput(os.Stdout)
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+	}
+
+	writers := []io.Writer{os.Stdout}
 	if logFile != "" {
 		rf := &rotatingFile{
 			path:       logFile,
@@ -96,6 +105,7 @@ func Setup(logFile string, maxSizeMB, maxBackups int) {
 		}
 		if err := rf.open(); err == nil {
 			writers = append(writers, rf)
+			closers = append(closers, func() { _ = rf.Close() })
 			log.Printf("log: writing to file %s", logFile)
 		} else {
 			log.Printf("log: open %s failed: %v (stdout only)", logFile, err)
@@ -103,4 +113,5 @@ func Setup(logFile string, maxSizeMB, maxBackups int) {
 	}
 	log.SetOutput(io.MultiWriter(writers...))
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	return release
 }

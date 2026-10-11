@@ -2,15 +2,23 @@ package intercept
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"artex/db"
 )
 
-// 用一个内存/临时 PostgreSQL 测试 guard 集成行为。
-// 需要本地 PG（postgres/postgres@127.0.0.1:5432/artex）。
+// 用临时 PostgreSQL 测试 guard 集成行为。
+// DSN 可用 ARTEX_TEST_DSN 覆盖（CI 里指向 service 容器）。
+func testDSN() string {
+	if v := os.Getenv("ARTEX_TEST_DSN"); v != "" {
+		return v
+	}
+	return "postgres://postgres:postgres@127.0.0.1:5432/artex?sslmode=disable"
+}
+
 func TestGuardIntegration(t *testing.T) {
-	database, err := db.Open(context.Background(), "postgres://postgres:postgres@127.0.0.1:5432/artex?sslmode=disable")
+	database, err := db.Open(context.Background(), testDSN())
 	if err != nil {
 		t.Skipf("需要本地 PostgreSQL: %v", err)
 	}

@@ -34,7 +34,9 @@ func main() {
 	}
 
 	// 日志落文件（stdout + 按大小轮转）
-	logging.Setup(cfg.Log.File, cfg.Log.MaxSizeMB, cfg.Log.MaxBackups)
+	// 日志落文件（stdout + 按大小轮转）；closeLog 释放文件句柄
+	closeLog := logging.Setup(cfg.Log.File, cfg.Log.MaxSizeMB, cfg.Log.MaxBackups)
+	defer closeLog()
 	log.Println("AI 渗透测试系统 · MVP 启动")
 
 	// 数据库
