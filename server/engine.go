@@ -44,8 +44,8 @@ func NewEngine(database *db.DB, workers int) *Engine {
 		workers:     workers,
 		debounce:    500,
 		idleTimeout: 30 * time.Second,
-		intentBudget: 40,  // 默认 40 条意图
-		tokenBudget:  500000, // 默认 50 万 token
+		intentBudget: 15,   // 默认 15 条意图（真实 LLM 会持续扩展，需硬上限）
+		tokenBudget:  150000, // 默认 15 万 token
 		running:     map[int64]context.CancelFunc{},
 		wcount:      map[int64]int{},
 	}

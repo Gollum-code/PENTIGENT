@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -94,6 +96,20 @@ func (p *OpenAIProvider) Ping(ctx context.Context) (string, error) {
 	return fmt.Sprintf("%s @ %s", p.model, p.baseURL), nil
 }
 
+// LLMError 结构化 LLM 错误（携带状态码 + Retry-After，便于精确退避）
+type LLMError struct {
+	StatusCode int
+	RetryAfter time.Duration // 上游建议的重试等待（0=未知）
+	Body       string
+}
+
+func (e *LLMError) Error() string {
+	return fmt.Sprintf("llm error %d: %s", e.StatusCode, e.Body)
+}
+
+// IsRateLimit 是否限流（429）
+func (e *LLMError) IsRateLimit() bool { return e.StatusCode == 429 }
+
 // llmSem 限制全局并发 LLM 请求，避免多任务同时打爆上游（触发 502/限流）
 var llmSem = make(chan struct{}, 3)
 
@@ -107,7 +123,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (ChatRespons
 		return ChatResponse{}, ctx.Err()
 	}
 
-	const maxAttempts = 3
+	const maxAttempts = 4
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		resp, err := p.chatOnce(ctx, req)
@@ -118,8 +134,20 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (ChatRespons
 		if !retryableLLMError(err) || attempt == maxAttempts-1 {
 			break
 		}
-		// 指数退避：1s, 2s, 4s（带 jitter）
-		backoff := time.Duration(1<<attempt) * time.Second
+		// 退避策略：
+		//  - 限流(429)：按 Retry-After 或 30s 起步（分钟级限流，秒级重试无意义）
+		//  - 其他可重试：1s / 2s / 4s 指数退避
+		var backoff time.Duration
+		var le *LLMError
+		if errors.As(err, &le) && le.IsRateLimit() {
+			backoff = le.RetryAfter
+			if backoff <= 0 {
+				backoff = 30 * time.Second
+			}
+			backoff *= time.Duration(1 + attempt) // 多次重试进一步拉长
+		} else {
+			backoff = time.Duration(1<<attempt) * time.Second
+		}
 		jitter := time.Duration(rand.Int63n(int64(500 * time.Millisecond)))
 		select {
 		case <-ctx.Done():
@@ -135,19 +163,19 @@ func retryableLLMError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	// 客户端错误（4xx 除 429）不重试：key/参数问题重试也没用
-	if strings.Contains(msg, "llm error 4") && !strings.Contains(msg, "429") {
-		return false
-	}
-	// 5xx / 429 / 网络 / 超时 / decode 都可能自愈
-	if strings.Contains(msg, "llm error 5") || strings.Contains(msg, "429") ||
-		strings.Contains(msg, "llm request") || strings.Contains(msg, "timeout") ||
-		strings.Contains(msg, "deadline") || strings.Contains(msg, "llm decode") ||
-		strings.Contains(msg, "EOF") || strings.Contains(msg, "connection reset") {
+	var le *LLMError
+	if errors.As(err, &le) {
+		// 4xx 除 429 外不重试（key/参数问题重试也没用）
+		if le.StatusCode >= 400 && le.StatusCode < 500 && le.StatusCode != 429 {
+			return false
+		}
 		return true
 	}
-	return false
+	msg := err.Error()
+	// 网络 / 超时 / 解码
+	return strings.Contains(msg, "llm request") || strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "deadline") || strings.Contains(msg, "llm decode") ||
+		strings.Contains(msg, "EOF") || strings.Contains(msg, "connection reset")
 }
 
 func (p *OpenAIProvider) chatOnce(ctx context.Context, req ChatRequest) (ChatResponse, error) {
@@ -202,7 +230,14 @@ func (p *OpenAIProvider) chatOnce(ctx context.Context, req ChatRequest) (ChatRes
 		return ChatResponse{}, err
 	}
 	if resp.StatusCode != 200 {
-		return ChatResponse{}, fmt.Errorf("llm error %d: %s", resp.StatusCode, string(data))
+		le := &LLMError{StatusCode: resp.StatusCode, Body: string(data)}
+		// 读 Retry-After（秒数形式，限流时上游通常会带）
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+				le.RetryAfter = time.Duration(secs) * time.Second
+			}
+		}
+		return ChatResponse{}, le
 	}
 	var decoded openAIResponse
 	if err := json.Unmarshal(data, &decoded); err != nil {
