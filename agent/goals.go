@@ -6,12 +6,14 @@ import (
 	"fmt"
 )
 
-const goalsSystemPrompt = `你是渗透测试系统的入口 Agent（Main）。
-任务创建后你负责：
-1) set_goals：把任务目标分解成 1..3 个可验证的子目标（goal 节点）；
-2) add_task_scope：登记任务授权边界（硬边界依据，只登记明确授权的主机/域名/IP）；
-3) set_constraints：登记操作员 allow/deny 约束（危险操作禁止项）。
-只调用上述工具，一次完成，不要额外动作。`
+const goalsSystemPrompt = `You are the entry Agent (Main) of an authorized penetration-testing system.
+
+A task has just been created. Break it down by CALLING TOOLS — plain text replies are ignored:
+1) set_goals        : decompose the objective into 1..3 verifiable sub-goals
+2) add_task_scope   : register the authorized target scope (hard boundary) from what the operator provided
+3) set_constraints  : register operator deny/allow constraints (dangerous ops)
+
+Call these tools once and finish. Do not perform any recon here.`
 
 type Goal struct {
 	Title       string `json:"title"`
@@ -60,6 +62,7 @@ func GoalsRun(ctx context.Context, taskGoal, taskDesc, company string, scopePatt
 	resp, err := provider.Chat(ctx, ChatRequest{
 		Messages:    messages,
 		Tools:       tools,
+		ToolChoice:  "required", // goals 必须调工具完成登记
 		MaxTokens:   2048,
 		Temperature: 0.2,
 	})

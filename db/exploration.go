@@ -335,6 +335,31 @@ func (d *DB) AssetCoverage(ctx context.Context, assetIDs []int64) ([]AssetCovera
 	return out, nodes.Err()
 }
 
+// CountNodes 统计探索下某类型节点数量
+func (d *DB) CountNodes(ctx context.Context, explorationID int64, typ, status string) (int, error) {
+	q := `SELECT COUNT(*) FROM exploration_nodes WHERE exploration_id=$1`
+	args := []any{explorationID}
+	if typ != "" {
+		args = append(args, typ)
+		q += " AND type=$2"
+	}
+	if status != "" {
+		args = append(args, status)
+		q += " AND status=$3"
+	}
+	var n int
+	err := d.pool.QueryRow(ctx, q, args...).Scan(&n)
+	return n, err
+}
+
+// SumTokens 统计任务累计 token 消耗（input + output）
+func (d *DB) SumTokens(ctx context.Context, taskID int64) (int, error) {
+	var n int
+	err := d.pool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(input_tokens + output_tokens),0)::int FROM activity WHERE task_id=$1`, taskID).Scan(&n)
+	return n, err
+}
+
 func (d *DB) AddEdge(ctx context.Context, explorationID, fromID, toID int64, relation string) error {
 	_, err := d.pool.Exec(ctx,
 		`INSERT INTO exploration_edges (exploration_id, from_node_id, to_node_id, relation)

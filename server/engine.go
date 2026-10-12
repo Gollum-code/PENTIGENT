@@ -20,6 +20,8 @@ type Engine struct {
 	workers int
 	debounce int // planner 唤醒 debounce（ms）
 	idleTimeout time.Duration // 无变更信号时的兜底收敛检查
+	intentBudget int // 单任务最大意图数（0=不限），防真实 LLM 无限扩展烧钱
+	tokenBudget  int // 单任务最大 token 消耗（0=不限）
 
 	mu      sync.Mutex
 	running map[int64]context.CancelFunc
@@ -42,6 +44,8 @@ func NewEngine(database *db.DB, workers int) *Engine {
 		workers:     workers,
 		debounce:    500,
 		idleTimeout: 30 * time.Second,
+		intentBudget: 40,  // 默认 40 条意图
+		tokenBudget:  500000, // 默认 50 万 token
 		running:     map[int64]context.CancelFunc{},
 		wcount:      map[int64]int{},
 	}
@@ -249,6 +253,7 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 
 	// 唤醒 planner（无状态：只读图+todolist）
 	planRes := e.planOnce(ctx, taskID, explorationID)
+	plannerErrCount := 0
 	if planRes.GoalProved {
 		_ = e.db.SetExplorationStatus(ctx, explorationID, "done")
 		_ = e.db.SetTaskStatus(ctx, taskID, "done", "")
@@ -302,6 +307,26 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 		}
 		idle.Reset(e.idleTimeout)
 		hasFrontier, _ := e.store.HasOpenIntent(ctx, explorationID)
+		// LLM 调用失败不算"无新方向"：退避后重试，避免上游抖动导致任务误判收敛。
+		// 用递增退避（不是紧密 signal 重试），否则上游持续故障时会打爆 API 造成自我 DoS。
+		if planRes.Error != "" {
+			if plannerErrCount < 3 {
+				plannerErrCount++
+				backoff := time.Duration(plannerErrCount*plannerErrCount) * 3 * time.Second
+				log.Printf("engine: task %d planner LLM 失败(第%d次), %v 后重试: %s", taskID, plannerErrCount, backoff, planRes.Error)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				continue // 直接重跑本轮（重新 planOnce）
+			}
+			// 连续多次失败 → 标记失败并停止，避免无限重试烧钱
+			_ = e.db.SetExplorationStatus(ctx, explorationID, "failed")
+			_ = e.db.SetTaskStatus(ctx, taskID, "failed", "planner LLM 连续失败: "+planRes.Error)
+			log.Printf("engine: task %d planner 连续 LLM 失败，终止", taskID)
+			return
+		}
 		if len(planRes.NewIntents) == 0 && !hasFrontier && e.activeWorkers(taskID) == 0 {
 			allMet, metCount, totalGoals := e.goalsAllMet(ctx, explorationID)
 			if allMet {
@@ -315,6 +340,28 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 				log.Printf("engine: task %d %s", taskID, msg)
 			}
 			return
+		}
+
+		// 预算护栏：意图数或 token 超上限 → 停止（防真实 LLM 无限扩展烧钱）
+		if e.intentBudget > 0 {
+			nIntents, _ := e.store.CountNodes(ctx, explorationID, "intent", "")
+			if nIntents >= e.intentBudget {
+				msg := fmt.Sprintf("达到意图预算上限 %d，停止规划", e.intentBudget)
+				_ = e.db.SetExplorationStatus(ctx, explorationID, "incomplete")
+				_ = e.db.SetTaskStatus(ctx, taskID, "incomplete", msg)
+				log.Printf("engine: task %d %s", taskID, msg)
+				return
+			}
+		}
+		if e.tokenBudget > 0 {
+			spent, _ := e.store.SumTokens(ctx, taskID)
+			if spent >= e.tokenBudget {
+				msg := fmt.Sprintf("达到 token 预算上限 %d，停止", e.tokenBudget)
+				_ = e.db.SetExplorationStatus(ctx, explorationID, "incomplete")
+				_ = e.db.SetTaskStatus(ctx, taskID, "incomplete", msg)
+				log.Printf("engine: task %d %s（已用 %d）", taskID, msg, spent)
+				return
+			}
 		}
 	}
 }

@@ -13,17 +13,29 @@ type Planner struct{}
 // NewPlanner 占位（实际 db.Store 在 engine 侧注入）
 func NewPlanner() *Planner { return &Planner{} }
 
-const plannerSystemPrompt = `你是渗透测试系统的 Planner（规划者）。
-你是**唯一**能生成意图(intent)的角色。
-每次唤醒你会看到探索图态势 STATE。请判断：
-1) 目标是否已达成 → 若达成调用 prove_goal；
-2) 是否存在"新方向"值得推进 → 只对真正的新方向调用 add_intent 派 0..N 条意图进 frontier；
-3) 若 frontier 已满 / 无新方向 → 不调用工具，表示等待或结束。
+const plannerSystemPrompt = `You are the Planner of an authorized penetration-testing system.
 
-注意：跨唤醒共享 todolist 记录了整体攻击链的推进顺序；
-串行利用链（发现注入点→取凭据→横向→提权）请记一次，按依赖逐步派，不要一次全派完。
+You are the ONLY role that can create intents. You decide the next move by CALLING A TOOL — never by replying with plain text.
 
-STATE 是机器可读的态势快照：goal / target / open_intents / done_intents / facts / findings / goals_met。`
+On each wake-up you receive the exploration-graph snapshot (STATE). Decide:
+
+1) If the goal is already achieved  -> call prove_goal (pass goal_ids=[] and a summary).
+2) If there are genuinely new directions to explore -> call add_intent one or more times to dispatch 0..N intents.
+3) If nothing new to explore and the frontier is empty -> if goals are all met call prove_goal, otherwise prove_goal is not allowed; in that case call add_intent only if you see a real new angle, else produce nothing (wait).
+
+Rules:
+- Prefer action over commentary. Your reply text is ignored; ONLY tool calls matter.
+- Keep each intent small, concrete and independently executable (e.g. "enumerate subdomains", "fingerprint services", "check /admin exposure").
+- Do not re-plan work already captured in the shared todolist; advance to the next step of the attack chain.
+- Serial chains (find injection -> get creds -> pivot -> escalate) should be planned one step at a time as dependencies require.
+- BUDGET DISCIPLINE: the run has a hard cap on total intents and tokens. Prefer 2-4 focused,
+  high-value intents per wake-up over a long list of speculative ones. If the frontier already has
+  open work, do not add more — wait for results first. Stop exploring a direction once it yields
+  no new facts.
+- When the surface is adequately mapped (assets + services + a vulnerability check are done),
+  call prove_goal instead of inventing more work.
+
+STATE fields: goal / target / open_intents / done_intents / facts / findings / goals_met.`
 
 type PlannerState struct {
 	Goal        string `json:"goal"`
@@ -84,6 +96,7 @@ STATE: %s
 	resp, err := provider.Chat(ctx, ChatRequest{
 		Messages:    messages,
 		Tools:       tools,
+		ToolChoice:  "required", // planner 必须调工具，避免模型只回文本导致闭环断裂
 		MaxTokens:   2048,
 		Temperature: 0.3,
 	})

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"pentigent/agent"
@@ -24,6 +25,33 @@ type Server struct {
 	engine *Engine
 	// serveStatic 由 cmd 注入（go:embed 前端）
 	serveStatic http.Handler
+
+	// LLM 健康缓存（避免 health 被 LLM 延迟阻塞）
+	llmMu         sync.Mutex
+	lastLLMCheck  time.Time
+	lastLLMOK     bool
+	lastLLMLatency float64
+	lastLLMInfo    string
+}
+
+// refreshLLM 后台探测 LLM 连通性并更新缓存
+func (s *Server) refreshLLM(prov agent.Provider) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	info, err := prov.Ping(ctx)
+	latency := float64(time.Since(start).Microseconds()) / 1000
+	s.llmMu.Lock()
+	defer s.llmMu.Unlock()
+	s.lastLLMCheck = time.Now()
+	s.lastLLMLatency = latency
+	if err != nil {
+		s.lastLLMOK = false
+		s.lastLLMInfo = err.Error()
+	} else {
+		s.lastLLMOK = true
+		s.lastLLMInfo = info
+	}
 }
 
 // 简易路由表：method + path pattern
@@ -238,16 +266,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ map[stri
 	}
 	dbMs = float64(time.Since(start).Microseconds()) / 1000
 
-	// LLM 连通性与延迟
-	llmOK := true
-	var llmMs float64
-	var llmErr string
-	lstart := time.Now()
-	if _, err := prov.Ping(r.Context()); err != nil {
-		llmOK = false
-		llmErr = err.Error()
+	// LLM 连通性：用短超时，且后台异步刷新缓存（health 不被 LLM 拖慢）
+	s.llmMu.Lock()
+	stale := s.lastLLMCheck.IsZero() || time.Since(s.lastLLMCheck) > 30*time.Second
+	llmOK := s.lastLLMOK
+	llmMs := s.lastLLMLatency
+	llmErr := s.lastLLMInfo
+	s.llmMu.Unlock()
+	if stale {
+		go s.refreshLLM(prov)
 	}
-	llmMs = float64(time.Since(lstart).Microseconds()) / 1000
 
 	// 运行中任务数 / 待审批积压
 	running := s.engine.RunningCount()

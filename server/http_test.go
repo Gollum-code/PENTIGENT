@@ -46,8 +46,11 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 	var body map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if body["status"] != "ok" {
-		t.Errorf("health status=%v", body["status"])
+	if body["status"] != "ok" && body["status"] != "degraded" {
+		t.Errorf("health status=%v (应为 ok/degraded)", body["status"])
+	}
+	if body["version"] == nil {
+		t.Error("health 缺 version")
 	}
 }
 

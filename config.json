@@ -16,7 +16,7 @@
     "mock_write_probe": false
   },
   "llm": {
-    "profile": "default-mock"
+    "profile": "openai"
   },
   "log": {
     "file": "logs/pentigent.log",

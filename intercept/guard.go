@@ -74,6 +74,9 @@ func (g *Guard) Check(ctx context.Context, tool string, input map[string]any) (D
 
 	// 2. 资产硬边界：bash/webfetch 必须校验目标在任务范围内（代码硬判，不依赖 LLM/规则）
 	if tool == "bash" || tool == "webfetch" {
+		if reason := selfProbeDenied(tool, input); reason != "" {
+			return Decision{Action: "deny", Reason: reason}, nil
+		}
 		targets := extractHosts(tool, input)
 		for _, h := range targets {
 			if !g.inScope(h) {
@@ -119,6 +122,47 @@ func (g *Guard) Check(ctx context.Context, tool string, input map[string]any) (D
 	return Decision{Action: "allow", Reason: "默认放行"}, nil
 }
 
+// selfProbeDenied 拦截 agent 对"本机/自身"的探测。
+// 真实 LLM 偶尔会把目标搞混，去读本机配置文件或列自身目录 —— 这既无价值又是安全问题。
+func selfProbeDenied(tool string, input map[string]any) string {
+	raw := ""
+	switch tool {
+	case "bash":
+		raw, _ = input["command"].(string)
+	case "webfetch":
+		raw, _ = input["url"].(string)
+	}
+	if raw == "" {
+		return ""
+	}
+	lower := strings.ToLower(raw)
+
+	// 回环地址 / 本机
+	for _, needle := range []string{"127.0.0.1", "localhost", "0.0.0.0", "[::1]", ":8080"} {
+		if strings.Contains(lower, needle) {
+			return fmt.Sprintf("禁止探测本机/自身服务（%s）", needle)
+		}
+	}
+	// 读取本地敏感文件
+	for _, needle := range []string{
+		"config.json", ".env", "id_rsa", "id_ed25519", ".ssh", "credentials",
+		"shadow", "hosts", "known_hosts", ".git-credentials", "apikeys",
+		"webui/dist", "logs/", "go.sum", ".git/",
+	} {
+		if strings.Contains(lower, needle) {
+			return fmt.Sprintf("禁止读取本地敏感路径（%s）", needle)
+		}
+	}
+	// 列目录 / 找文件（Get-ChildItem / dir / ls / find）
+	for _, needle := range []string{"get-childitem", "get-childitem -recurse", "dir ", "ls -", "get-location", "pwd"} {
+		if strings.Contains(lower, needle) {
+			return "禁止枚举本机文件系统（与授权目标无关）"
+		}
+	}
+	return ""
+}
+
+// matchRule 单条规则的匹配
 func matchRule(r db.InterceptRule, tool string, input map[string]any) (bool, error) {
 	var target string
 	if r.MatchTarget == "tool_name" {

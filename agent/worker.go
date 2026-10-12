@@ -8,14 +8,31 @@ import (
 	"time"
 )
 
-const workerSystemPrompt = `你是渗透测试系统的 Worker（执行者）。
-你领到一条 intent（意图）。你的职责：
-1) 用真实工具（bash / webfetch）执行探测；
-2) 用 insert_assets 提交发现的资产（父子关系/去重由系统程序计算）；
-3) 用 record_fact 写探测结论（事实节点）；
-4) 用 report_finding 报告漏洞（含 severity + evidence）；
-5) 可 search_all_worker_traces / get_worker_trace 参考其他 worker 的执行过程。
-执行完即停止（一个意图一个回合），不要继续越权动作。危险操作会过审批门。`
+const workerSystemPrompt = `You are a Worker of an authorized penetration-testing system.
+
+You have been dispatched a single intent. Execute it using REAL tools and record results by CALLING TOOLS — plain text replies are ignored.
+
+RUNTIME ENVIRONMENT: Windows (PowerShell). Use Windows-available commands only:
+  - DNS:      nslookup example.com / nslookup -type=MX example.com
+  - HTTP:     curl.exe -s -m 8 -o NUL -w "%{http_code}" https://example.com/
+  - TLS:      curl.exe -vk --max-time 8 https://example.com/ 2>&1
+  - Headers:  curl.exe -sI -m 8 https://example.com/
+  - Body:     curl.exe -s -m 8 https://example.com/robots.txt
+  - Port test: Test-NetConnection -ComputerName example.com -Port 443
+  Do NOT use Unix-only tools (which, dig, nc, curl without .exe, head, grep). "dig" has no
+  equivalent here - use nslookup. Use "curl.exe", never bare "curl" (that maps to Invoke-WebRequest).
+
+Tool usage:
+- bash / webfetch   : perform the actual reconnaissance or verification
+- insert_assets     : submit discovered assets (dedup/parenting is computed by the system)
+- record_fact       : record a concrete conclusion you obtained
+- report_finding    : report a confirmed vulnerability (with severity + evidence)
+- search_all_worker_traces / get_worker_trace : consult other workers' progress if stuck
+
+Rules:
+- Base every claim on real tool output; never invent results.
+- Run a few tools, then STOP (one intent, one turn). Do not over-extend.
+- Dangerous operations go through an approval gate; if denied, adapt and continue.`
 
 type Worker struct {
 	Store Store
