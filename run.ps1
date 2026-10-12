@@ -2,9 +2,11 @@
 #  PENTIGENT · 一键启动脚本（Windows PowerShell）
 #  双击 start.bat 或运行 .\run.ps1 即可
 #  自动：检测 Go / PostgreSQL / Node → 安装缺失项 → 建库
-#        → 构建前端+后端 → 启动服务
+#        → 构建前端+后端 → 启动服务 → 自动打开浏览器
+#  参数：-NoOpen 不自动打开浏览器
 # ============================================================
 
+param([switch]$NoOpen, [switch]$NoBuild)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
@@ -137,10 +139,16 @@ try {
   Write-Output "  初始化状态: setup=$($health.setup)"
   Write-Output "=============================================="
   Write-Output ""
-  Write-Output "下一步："
-  Write-Output "  浏览器访问 $base 设管理员密码后即可建任务"
-  Write-Output "  或跑在线实测: .\e2e-test.ps1"
-  Write-Output "  停止服务:     Stop-Process -Name pentigent"
+  # 自动打开浏览器（-NoOpen 时跳过）
+  if (-not $NoOpen) { Start-Process $base }
+  Write-Output "常用："
+  Write-Output "  在线实测: .\e2e-test.ps1"
+  Write-Output "  看日志:   logs\pentigent.log"
+  Write-Output "  停止服务: Stop-Process -Name pentigent"
+  if (-not $NoOpen) {
+    Write-Output ""
+    Write-Host "服务已在后台运行 —— 本窗口可关，浏览器已打开 http://127.0.0.1:8080" -ForegroundColor Green
+  }
 } catch {
   Write-Output "服务启动失败：$($_.Exception.Message)"
   Write-Output "请查看日志 logs\pentigent.log"
