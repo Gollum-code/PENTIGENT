@@ -80,7 +80,32 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request, _ map[
 		}
 		_ = s.db.AddScope(s.ctx(), taskID, host, kind)
 	}
-	writeJSON(w, 200, map[string]any{"id": taskID, "name": req.Name, "goal": req.Goal, "status": "created"})
+
+	// 校验：目标里提到的域名若不在授权范围内，给出警告（否则任务会全程被硬边界拦截）
+	scopeSet := map[string]bool{}
+	for _, sc := range req.Scope {
+		scopeSet[strings.ToLower(sc)] = true
+	}
+	var warnings []string
+	mentioned := extractDomains(req.Goal + " " + req.Description)
+	for _, h := range mentioned {
+		lh := strings.ToLower(h)
+		inScope := false
+		for sc := range scopeSet {
+			if lh == sc || strings.HasSuffix(lh, "."+sc) {
+				inScope = true
+				break
+			}
+		}
+		if !inScope {
+			warnings = append(warnings, h+" 在目标描述里但不在授权范围，相关探测会被硬边界拦截")
+		}
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"id": taskID, "name": req.Name, "goal": req.Goal, "status": "created",
+		"scope": req.Scope, "warnings": warnings,
+	})
 }
 
 func (s *Server) handleSetTaskNotes(w http.ResponseWriter, r *http.Request, params map[string]string) {

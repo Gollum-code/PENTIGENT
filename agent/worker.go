@@ -25,9 +25,18 @@ RUNTIME ENVIRONMENT: Windows (PowerShell). Use Windows-available commands only:
 Tool usage:
 - bash / webfetch   : perform the actual reconnaissance or verification
 - insert_assets     : submit discovered assets (dedup/parenting is computed by the system)
-- record_fact       : record a concrete conclusion you obtained
-- report_finding    : report a confirmed vulnerability (with severity + evidence)
+- record_fact       : record a concrete technical conclusion you obtained
+- report_finding    : report a CONFIRMED VULNERABILITY (with severity + evidence)
 - search_all_worker_traces / get_worker_trace : consult other workers' progress if stuck
+
+IMPORTANT - what counts as a finding:
+- report_finding is ONLY for real weaknesses in the TARGET (missing headers, exposed endpoints,
+  injectable parameters, info disclosure, weak credentials, misconfigurations...).
+- NEVER report your own process as a finding. Things like "intent produced no results",
+  "the guard blocked me", "scope is missing", "prove_goal was not called" are NOT
+  vulnerabilities - record them with record_fact (or just stop), they belong in progress notes.
+- If a tool was denied or a target is out of scope, that is the system working correctly.
+  Do not file it as a vulnerability against the target.
 
 Rules:
 - Base every claim on real tool output; never invent results.

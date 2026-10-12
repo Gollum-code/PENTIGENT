@@ -81,7 +81,12 @@ func TestExtractHosts(t *testing.T) {
 		{"nslookup notinscope.org", []string{"notinscope.org"}},
 		{"whoami", nil},
 		{"echo hello", nil},
-		{"ping -n 1 8.8.8.8", nil},
+		{"ping -n 1 8.8.8.8", []string{"8.8.8.8"}},
+		// 回归：PowerShell TCP 探测曾绕过资产硬边界
+		{"Test-NetConnection -ComputerName wenku.baidu.com -Port 443", []string{"wenku.baidu.com"}},
+		{"Test-NetConnection -ComputerName 192.168.1.1 -Port 445", []string{"192.168.1.1"}},
+		// 文件名不应被当成主机
+		{"curl.exe -o out.txt -s https://example.com/", []string{"example.com"}},
 	}
 	for _, c := range cases {
 		got := extractHosts("bash", map[string]any{"command": c.cmd})

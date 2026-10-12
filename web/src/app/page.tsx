@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { api, apiSafe, useAuth } from "@/lib/store";
+import { api, apiSafe, useAuth, useToast } from "@/lib/store";
 import Nav from "@/components/Nav";
 import Pagination from "@/components/Pagination";
 import StatsBar from "@/components/StatsBar";
@@ -82,6 +82,10 @@ function Dashboard() {
       setShowCreate(false);
       setForm({ name: "", goal: "", description: "", scope: "" });
       load(page, statusFilter, search);
+      // 授权范围与目标不一致的警告
+      if (d.warnings?.length) {
+        setTimeout(() => useToast.getState().show(d.warnings.join("；"), "err"), 400);
+      }
     }
   };
 

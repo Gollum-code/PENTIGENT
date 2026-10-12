@@ -204,33 +204,65 @@ func extractHosts(tool string, input map[string]any) []string {
 	if raw == "" {
 		return nil
 	}
-	// 匹配 URL 中的 host
 	var out []string
 	seen := map[string]bool{}
+	add := func(h string) {
+		h = strings.TrimSpace(h)
+		if h != "" && !seen[h] {
+			out = append(out, h)
+			seen[h] = true
+		}
+	}
+
+	// 1) URL 里的 host
 	urlRe := regexp.MustCompile(`https?://([a-zA-Z0-9\-\.]+(?::\d+)?)`)
 	for _, m := range urlRe.FindAllStringSubmatch(raw, -1) {
-		if len(m) > 1 && !seen[m[1]] {
-			out = append(out, m[1])
-			seen[m[1]] = true
+		if len(m) > 1 {
+			add(m[1])
 		}
 	}
-	// 匹配裸域名/IP（nslookup/ping/dig/curl 目标）：只取最后一个参数，且必须像域名
-	hostRe := regexp.MustCompile(`(?i)(?:nslookup|ping|dig|host)\s+(?:-[^\s]+\s+)*([a-z0-9][a-z0-9\-\.]*\.[a-z]{2,}|[0-9]{1,3}(?:\.[0-9]{1,3}){3})`)
-	for _, m := range hostRe.FindAllStringSubmatch(raw, -1) {
-		if len(m) > 1 && !seen[m[1]] {
-			out = append(out, m[1])
-			seen[m[1]] = true
+
+	// 2) 显式主机参数：-ComputerName / -Host / -Server / -Domain / --host / -target ...
+	flagRe := regexp.MustCompile(`(?i)(?:--?[a-z\-]*(?:computername|host|server|domain|target|addr|ip|hostname)[a-z\-]*)\s+["']?([a-z0-9][a-z0-9\-\.]*(?::\d+)?|[0-9]{1,3}(?:\.[0-9]{1,3}){3})["']?`)
+	for _, m := range flagRe.FindAllStringSubmatch(raw, -1) {
+		if len(m) > 1 {
+			add(m[1])
 		}
 	}
-	// 匹配裸 IP（curl/nc 直接给 IP 的场景）
-	ipRe := regexp.MustCompile(`(?:curl|nc|netcat|telnet)\s+(?:-[^\s]+\s+)*([0-9]{1,3}(?:\.[0-9]{1,3}){3})`)
+
+	// 3) 命令行里出现的裸 IP（fail-closed：任何 IP 都当作探测目标）
+	ipRe := regexp.MustCompile(`\b([0-9]{1,3}(?:\.[0-9]{1,3}){3})\b`)
 	for _, m := range ipRe.FindAllStringSubmatch(raw, -1) {
-		if len(m) > 1 && !seen[m[1]] {
-			out = append(out, m[1])
-			seen[m[1]] = true
+		if len(m) > 1 {
+			add(m[1])
 		}
 	}
+
+	// 4) 命令行里出现的裸域名（fail-closed：抓所有像域名的 token）
+	//    排除常见文件扩展名，避免把 out.txt / config.json 误当目标。
+	domainRe := regexp.MustCompile(`\b([a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)\b`)
+	for _, m := range domainRe.FindAllStringSubmatch(raw, -1) {
+		if len(m) > 1 && !isFileExt(m[1]) {
+			add(m[1])
+		}
+	}
+
 	return out
+}
+
+// isFileExt 判断 token 是否以常见文件扩展名结尾（不是主机名）
+func isFileExt(s string) bool {
+	i := strings.LastIndex(s, ".")
+	if i < 0 {
+		return false
+	}
+	switch strings.ToLower(s[i+1:]) {
+	case "txt", "log", "json", "html", "htm", "js", "css", "xml", "png", "jpg",
+		"jpeg", "gif", "ico", "php", "py", "go", "md", "csv", "yaml", "yml",
+		"conf", "ini", "sh", "bat", "ps1", "db", "sql", "exe", "dll", "bak", "tmp":
+		return true
+	}
+	return false
 }
 
 // inScope 判断 host 是否在任务授权边界内（后缀匹配 + IP 精确）
