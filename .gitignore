@@ -21,3 +21,5 @@ Thumbs.db
 .DS_Store
 # 真实渗透下载的产物
 s.js
+curl_err.txt
+fav.ico
