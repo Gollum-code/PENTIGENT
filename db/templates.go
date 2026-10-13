@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"strings"
 )
 
@@ -47,10 +48,24 @@ func (d *DB) CreateTaskTemplate(ctx context.Context, t TaskTemplate) (int64, err
 	return id, err
 }
 
+// DeleteTaskTemplate 删除自定义模板。内置模板返回 error（不能删）。
 func (d *DB) DeleteTaskTemplate(ctx context.Context, id int64) error {
-	// 内置模板不可删
-	_, err := d.pool.Exec(ctx, `DELETE FROM task_templates WHERE id=$1 AND builtin=FALSE`, id)
-	return err
+	tag, err := d.pool.Exec(ctx, `DELETE FROM task_templates WHERE id=$1 AND builtin=FALSE`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// 区分"不存在"和"内置不可删"，给出明确原因
+		var builtin bool
+		err := d.pool.QueryRow(ctx, `SELECT builtin FROM task_templates WHERE id=$1`, id).Scan(&builtin)
+		if err != nil {
+			return fmt.Errorf("模板不存在")
+		}
+		if builtin {
+			return fmt.Errorf("内置模板不可删除")
+		}
+	}
+	return nil
 }
 
 func (d *DB) UpdateTaskTemplate(ctx context.Context, id int64, t TaskTemplate) error {

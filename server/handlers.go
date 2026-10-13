@@ -527,7 +527,8 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 	if err := s.db.DeleteTaskTemplate(s.ctx(), id); err != nil {
-		writeErr(w, 500, err.Error())
+		// 内置模板 / 不存在 → 400 明确报错，而不是静默 200
+		writeErr(w, 400, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"deleted": id})

@@ -87,6 +87,9 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request, _ map[
 		scopeSet[strings.ToLower(sc)] = true
 	}
 	var warnings []string
+	if len(req.Scope) == 0 {
+		warnings = append(warnings, "未能从目标描述中识别出授权域名/IP，范围为空将导致所有探测被硬边界拦截，请手动填写授权范围")
+	}
 	mentioned := extractDomains(req.Goal + " " + req.Description)
 	for _, h := range mentioned {
 		lh := strings.ToLower(h)

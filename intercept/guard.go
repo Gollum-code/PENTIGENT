@@ -78,8 +78,9 @@ func (g *Guard) Check(ctx context.Context, tool string, input map[string]any) (D
 			return Decision{Action: "deny", Reason: reason}, nil
 		}
 		targets := extractHosts(tool, input)
+		urls := extractURLs(tool, input)
 		for _, h := range targets {
-			if !g.inScope(h) {
+			if !g.inScopeTarget(h, urls) {
 				return Decision{Action: "deny", Reason: fmt.Sprintf("资产硬边界：%s 不在任务授权范围内", h)}, nil
 			}
 		}
@@ -265,7 +266,7 @@ func isFileExt(s string) bool {
 	return false
 }
 
-// inScope 判断 host 是否在任务授权边界内（后缀匹配 + IP 精确）
+// inScope 判断 host 是否在任务授权边界内（域名后缀 + IP 精确；不含 url_prefix）
 func (g *Guard) inScope(host string) bool {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" {
@@ -286,10 +287,6 @@ func (g *Guard) inScope(host string) bool {
 			if h == p {
 				return true
 			}
-		case "url_prefix":
-			if strings.HasPrefix(h, p) {
-				return true
-			}
 		default:
 			if h == p || strings.HasSuffix(h, "."+p) {
 				return true
@@ -297,4 +294,58 @@ func (g *Guard) inScope(host string) bool {
 		}
 	}
 	return false
+}
+
+// inScopeTarget 判断一次调用里的某个 host 是否在范围内。
+// 规则：host 命中 domain/ip 范围，或该调用携带的某个 URL 命中 url_prefix 范围。
+func (g *Guard) inScopeTarget(host string, urls []string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return true
+	}
+	// 去掉端口用于 url_prefix 比较
+	hostNoPort := h
+	if i := strings.LastIndex(hostNoPort, ":"); i > 0 && !strings.Contains(hostNoPort[i+1:], ".") {
+		hostNoPort = hostNoPort[:i]
+	}
+	for _, s := range g.scope {
+		if s.Kind != "url_prefix" {
+			continue
+		}
+		prefix := strings.ToLower(strings.TrimSpace(s.Pattern))
+		for _, u := range urls {
+			lu := strings.ToLower(u)
+			if strings.HasPrefix(lu, prefix) {
+				// 该 URL 的 host 必须就是当前校验的 host，避免用 A 的 URL 给 B 放行
+				if uHost := hostOf(lu); uHost == "" || uHost == hostNoPort {
+					return true
+				}
+			}
+		}
+	}
+	return g.inScope(host)
+}
+
+// hostOf 从 URL 提取 host（不含端口）
+func hostOf(rawURL string) string {
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Hostname() != "" {
+		return strings.ToLower(parsed.Hostname())
+	}
+	return ""
+}
+
+// extractURLs 从工具入参提取完整 URL（供 url_prefix 校验）
+func extractURLs(tool string, input map[string]any) []string {
+	var raw string
+	switch tool {
+	case "webfetch":
+		raw, _ = input["url"].(string)
+	case "bash":
+		raw, _ = input["command"].(string)
+	}
+	if raw == "" {
+		return nil
+	}
+	urlRe := regexp.MustCompile(`https?://[^\s"'` + "`" + `]+`)
+	return urlRe.FindAllString(raw, -1)
 }
