@@ -12,11 +12,12 @@ import (
 )
 
 // Guard 审批门：规则匹配 + 资产硬边界
-// 决策优先级：intercept_rules(allow/deny/ask) → asset 硬边界(deny) → 默认 allow
+// 决策优先级：asset 黑名单(deny) → intercept_rules(deny) → asset 硬边界 → 操作员约束 → ask 规则 → allow 规则 → 默认 allow
 type Guard struct {
-	store   *db.DB
-	rules   []db.InterceptRule
-	scope   []db.ScopeItem // 任务授权边界（硬边界分母）
+	store      *db.DB
+	rules      []db.InterceptRule
+	assetRules []db.AssetRule // 资产黑名单（硬边界，永不探测）
+	scope      []db.ScopeItem // 任务授权边界（硬边界分母）
 	constraints []struct {
 		Kind    string `json:"kind"`
 		Pattern string `json:"pattern"`
@@ -27,13 +28,20 @@ func NewGuard(store *db.DB) *Guard {
 	return &Guard{store: store}
 }
 
-// Bind 绑定任务上下文：加载任务范围 + 约束（每次任务启动时调用）
+// Bind 绑定任务上下文：加载拦截规则 + 资产黑名单 + 任务范围 + 约束（每次任务启动时调用）
 func (g *Guard) Bind(ctx context.Context, taskID int64) error {
 	rules, err := g.store.ListRules(ctx)
 	if err != nil {
 		return err
 	}
 	g.rules = rules
+
+	// 资产黑名单：全局生效，与任务 scope 无关（云元数据等永禁目标）
+	assetRules, err := g.store.ListAssetRules(ctx)
+	if err != nil {
+		return err
+	}
+	g.assetRules = assetRules
 
 	scope, err := g.store.ListScope(ctx, taskID)
 	if err != nil {
@@ -49,6 +57,20 @@ func (g *Guard) Bind(ctx context.Context, taskID int64) error {
 	return nil
 }
 
+// hostMatches host 与模式匹配（忽略端口；支持 IP 精确 + 域名后缀）
+func hostMatches(host, pattern string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	if host == "" || pattern == "" {
+		return false
+	}
+	// 去掉端口
+	if i := strings.LastIndex(host, ":"); i > 0 && !strings.Contains(host[i+1:], ".") {
+		host = host[:i]
+	}
+	return host == pattern || strings.HasSuffix(host, "."+pattern)
+}
+
 // Decision 决策结果
 type Decision struct {
 	Action string // allow | deny | ask
@@ -59,6 +81,21 @@ type Decision struct {
 // Check 对一次工具调用做审批决策
 // 决策优先级：deny 规则 → 资产硬边界（bash/webfetch 必检）→ ask 规则 → allow 规则 → 默认 allow
 func (g *Guard) Check(ctx context.Context, tool string, input map[string]any) (Decision, error) {
+	// 0. 资产黑名单：永禁目标（云元数据等），最高优先级，与任务 scope 无关
+	if tool == "bash" || tool == "webfetch" {
+		targets := extractHosts(tool, input)
+		for _, h := range targets {
+			for _, ar := range g.assetRules {
+				if ar.Action != "deny" {
+					continue
+				}
+				if hostMatches(strings.ToLower(h), strings.ToLower(strings.TrimSpace(ar.Pattern))) {
+					return Decision{Action: "deny", Reason: fmt.Sprintf("资产黑名单：%s（%s）", h, ar.Note)}, nil
+				}
+			}
+		}
+	}
+
 	// 1. deny 规则（先命中先决策，不受 allow 影响）
 	for _, r := range g.rules {
 		if !r.Enabled || r.Action != "deny" {

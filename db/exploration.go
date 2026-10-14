@@ -395,25 +395,3 @@ func (d *DB) Anchor(ctx context.Context, explorationID, nodeID, assetID int64) e
 		explorationID, nodeID, assetID)
 	return err
 }
-
-// AnchorsForAssets 反查资产被哪些节点测过
-func (d *DB) AnchorsForAssets(ctx context.Context, assetIDs []int64) (map[int64][]int64, error) {
-	out := map[int64][]int64{}
-	if len(assetIDs) == 0 {
-		return out, nil
-	}
-	rows, err := d.pool.Query(ctx,
-		`SELECT asset_id, node_id FROM exploration_anchors WHERE asset_id = ANY($1)`, assetIDs)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var a, n int64
-		if err := rows.Scan(&a, &n); err != nil {
-			return nil, err
-		}
-		out[a] = append(out[a], n)
-	}
-	return out, rows.Err()
-}

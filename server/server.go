@@ -121,6 +121,7 @@ func (s *Server) routes() []route {
 		// 模板 / 报告设置
 		{Method: "GET", Pattern: "/api/templates", Handler: s.handleListTemplates, Auth: true},
 		{Method: "POST", Pattern: "/api/templates", Handler: s.handleCreateTemplate, Auth: true},
+		{Method: "PUT", Pattern: "/api/templates/:id", Handler: s.handleUpdateTemplate, Auth: true},
 		{Method: "DELETE", Pattern: "/api/templates/:id", Handler: s.handleDeleteTemplate, Auth: true},
 		{Method: "GET", Pattern: "/api/report-settings", Handler: s.handleGetReportSettings, Auth: true},
 		{Method: "POST", Pattern: "/api/report-settings", Handler: s.handleUpdateReportSettings, Auth: true},

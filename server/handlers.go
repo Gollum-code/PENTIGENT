@@ -520,6 +520,28 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request, _ 
 	writeJSON(w, 200, map[string]any{"id": id, "created": true})
 }
 
+func (s *Server) handleUpdateTemplate(w http.ResponseWriter, r *http.Request, params map[string]string) {
+	id, err := strconv.ParseInt(params["id"], 10, 64)
+	if err != nil {
+		writeErr(w, 400, "无效 id")
+		return
+	}
+	var t db.TaskTemplate
+	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+		writeErr(w, 400, "无效请求体")
+		return
+	}
+	if t.Name == "" || t.Goal == "" {
+		writeErr(w, 400, "name 和 goal 必填")
+		return
+	}
+	if err := s.db.UpdateTaskTemplate(s.ctx(), id, t); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"updated": id})
+}
+
 func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request, params map[string]string) {
 	id, err := strconv.ParseInt(params["id"], 10, 64)
 	if err != nil {

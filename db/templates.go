@@ -48,6 +48,26 @@ func (d *DB) CreateTaskTemplate(ctx context.Context, t TaskTemplate) (int64, err
 	return id, err
 }
 
+// UpdateTaskTemplate 更新自定义模板。内置模板返回 error。
+func (d *DB) UpdateTaskTemplate(ctx context.Context, id int64, t TaskTemplate) error {
+	tag, err := d.pool.Exec(ctx,
+		`UPDATE task_templates SET name=$2, description=$3, goal=$4, task_desc=$5, scope=$6, tags=$7
+		 WHERE id=$1 AND builtin=FALSE`, id, t.Name, t.Description, t.Goal, t.TaskDesc, t.Scope, t.Tags)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		var builtin bool
+		if err := d.pool.QueryRow(ctx, `SELECT builtin FROM task_templates WHERE id=$1`, id).Scan(&builtin); err != nil {
+			return fmt.Errorf("模板不存在")
+		}
+		if builtin {
+			return fmt.Errorf("内置模板不可修改")
+		}
+	}
+	return nil
+}
+
 // DeleteTaskTemplate 删除自定义模板。内置模板返回 error（不能删）。
 func (d *DB) DeleteTaskTemplate(ctx context.Context, id int64) error {
 	tag, err := d.pool.Exec(ctx, `DELETE FROM task_templates WHERE id=$1 AND builtin=FALSE`, id)
@@ -66,13 +86,6 @@ func (d *DB) DeleteTaskTemplate(ctx context.Context, id int64) error {
 		}
 	}
 	return nil
-}
-
-func (d *DB) UpdateTaskTemplate(ctx context.Context, id int64, t TaskTemplate) error {
-	_, err := d.pool.Exec(ctx,
-		`UPDATE task_templates SET name=$2, description=$3, goal=$4, task_desc=$5, scope=$6, tags=$7
-		 WHERE id=$1 AND builtin=FALSE`, id, t.Name, t.Description, t.Goal, t.TaskDesc, t.Scope, t.Tags)
-	return err
 }
 
 // ScopeList 模板 scope 字符串 → []string
