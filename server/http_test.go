@@ -229,4 +229,20 @@ func TestLLMTestEndpoint(t *testing.T) {
 	}
 }
 
+// CSV 公式注入：LLM 分析的标题可能来自攻击者可控内容，导出时必须中和
+func TestCSVFormulaInjection(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"=HYPERLINK(\"http://evil\",\"click\")", `"'=HYPERLINK(""http://evil"",""click"")"`},
+		{"@SUM(1+1)", "'@SUM(1+1)"},
+		{"+cmd|'/c calc'!A0", "'+cmd|'/c calc'!A0"},
+		{"normal title", "normal title"},
+		{"a,b", `"a,b"`},
+	}
+	for _, c := range cases {
+		if got := csvEscape(c.in); got != c.want {
+			t.Errorf("csvEscape(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func itoa(v int64) string { return strconv.FormatInt(v, 10) }

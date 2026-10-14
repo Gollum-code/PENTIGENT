@@ -67,6 +67,10 @@ func (e *Engine) Start(taskID int64) error {
 			e.mu.Lock()
 			delete(e.running, taskID)
 			e.mu.Unlock()
+			// 清理每任务 worker 计数，避免 wcount 映射随任务数无限增长
+			e.workerMu.Lock()
+			delete(e.wcount, taskID)
+			e.workerMu.Unlock()
 			cancel()
 		}()
 		e.run(ctx, taskID)
