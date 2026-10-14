@@ -158,17 +158,24 @@ func (e *Engine) findResumable(ctx context.Context, taskID int64) (int64, bool, 
 // runGoals 首次运行时做目标分解 + 约束登记 + 建 goal 节点
 func (e *Engine) runGoals(ctx context.Context, taskID int64, task *db.Task, explorationID int64) {
 	gr := agentGoalsRun(ctx, task)
+	// 记录授权范围落库失败（否则任务无 scope → guard 拦一切 → 空跑）
 	for _, s := range gr.Scope {
-		_ = e.db.AddScope(ctx, taskID, s.Pattern, s.Kind)
+		if err := e.db.AddScope(ctx, taskID, s.Pattern, s.Kind); err != nil {
+			log.Printf("engine: task %d AddScope(%s) 失败: %v", taskID, s.Pattern, err)
+		}
 	}
 	for _, c := range gr.Constraints {
-		_ = e.db.AddConstraint(ctx, taskID, c.Kind, c.Pattern)
+		if err := e.db.AddConstraint(ctx, taskID, c.Kind, c.Pattern); err != nil {
+			log.Printf("engine: task %d AddConstraint(%s) 失败: %v", taskID, c.Pattern, err)
+		}
 	}
 	if len(gr.Goals) == 0 {
 		gr.Goals = fallbackGoals(task.Goal, task.Description)
 	}
 	for _, g := range gr.Goals {
-		_, _ = e.store.CreateGoal(ctx, explorationID, g.Title, g.Description)
+		if _, err := e.store.CreateGoal(ctx, explorationID, g.Title, g.Description); err != nil {
+			log.Printf("engine: task %d CreateGoal(%s) 失败: %v", taskID, g.Title, err)
+		}
 	}
 	tid := int64(taskID)
 	_ = e.recordEngineActivity(tid, explorationID, "goals", "目标分解", gr.InputTokens, gr.OutputTokens, gr.Error)
@@ -224,11 +231,14 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 	if err := e.scopeFromTaskDesc(ctx, taskID, task.Description); err != nil {
 		log.Printf("engine: scope from desc: %v", err)
 	}
-	// 绑定 guard scope
-	_ = e.guard.Bind(ctx, taskID)
-
-	taskIDCopy := int64(taskID)
-	_ = taskIDCopy
+	// 绑定 guard scope + 资产黑名单。Bind 失败绝不能忽略：
+	// guard 会带着未加载的黑名单/规则运行 = 安全降级（fail-open）。
+	if err := e.guard.Bind(ctx, taskID); err != nil {
+		log.Printf("engine: task %d guard Bind 失败，终止以避免安全降级: %v", taskID, err)
+		_ = e.store.SetExplorationStatus(ctx, explorationID, "failed")
+		_ = e.db.SetTaskStatus(ctx, taskID, "failed", "guard 初始化失败: "+err.Error())
+		return
+	}
 
 	// ---- 闭环：事件驱动，planner ↔ workers ----
 	// worker 每次写回图变更 → 发 wake 信号 → debounce 后唤醒 planner。

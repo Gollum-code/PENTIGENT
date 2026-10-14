@@ -40,6 +40,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_assets_endpoint    ON assets(url, method) W
 CREATE INDEX IF NOT EXISTS ix_assets_company ON assets(company_id);
 CREATE INDEX IF NOT EXISTS ix_assets_type    ON assets(type);
 
+-- 预留：MVP 未接入（当前用 task_scope 做授权边界）
 CREATE TABLE IF NOT EXISTS company_scope (
     id          BIGSERIAL PRIMARY KEY,
     company_id  BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -136,6 +137,7 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 预留：MVP 未接入（当前用 config.json + 环境变量配置 LLM）
 CREATE TABLE IF NOT EXISTS llm_profiles (
     id          BIGSERIAL PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
@@ -175,6 +177,7 @@ CREATE TABLE IF NOT EXISTS task_scope (
     UNIQUE (task_id, pattern, kind)
 );
 
+-- 预留：MVP 未接入
 CREATE TABLE IF NOT EXISTS task_categories (
     id          BIGSERIAL PRIMARY KEY,
     task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -253,6 +256,7 @@ CREATE TABLE IF NOT EXISTS agents (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 预留：MVP 未接入（提示词当前硬编码在 agent 包常量中）
 CREATE TABLE IF NOT EXISTS agent_prompts (
     id          BIGSERIAL PRIMARY KEY,
     agent_id    BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
