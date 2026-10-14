@@ -103,6 +103,54 @@ func TestTemplateUpdateGuards(t *testing.T) {
 		t.Error("内置模板删除应报错")
 	}
 }
+
+// 回归：并发任务的授权范围隔离。
+// 旧实现用全局共享 guard，两个任务 Bind 会互相覆盖 scope，
+// 导致 A 能用 B 的范围探测（越权）。现在每任务独立实例，必须互不影响。
+func TestPerTaskGuardIsolation(t *testing.T) {
+	database, err := db.Open(context.Background(), testDSN())
+	if err != nil {
+		t.Skipf("需要本地 PostgreSQL: %v", err)
+	}
+	defer database.Close()
+	if err := database.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	tidA, _ := database.CreateTask(ctx, "iso-a", "g", "", nil)
+	defer database.DeleteTask(ctx, tidA)
+	_ = database.AddScope(ctx, tidA, "example.com", "domain")
+	tidB, _ := database.CreateTask(ctx, "iso-b", "g", "", nil)
+	defer database.DeleteTask(ctx, tidB)
+	_ = database.AddScope(ctx, tidB, "secret-target.org", "domain")
+
+	// 两个独立 guard 实例（修复后的模型）
+	guardA := NewGuard(database)
+	guardB := NewGuard(database)
+	if err := guardA.Bind(ctx, tidA); err != nil {
+		t.Fatal(err)
+	}
+	if err := guardB.Bind(ctx, tidB); err != nil {
+		t.Fatal(err)
+	}
+
+	// A 只能碰 example.com，不能碰 B 的 secret-target.org
+	if d, _ := guardA.Check(ctx, "webfetch", map[string]any{"url": "https://example.com/"}); d.Action != "allow" {
+		t.Errorf("A 应能访问自己的 example.com，得到 %s", d.Action)
+	}
+	if d, _ := guardA.Check(ctx, "webfetch", map[string]any{"url": "https://secret-target.org/"}); d.Action != "deny" {
+		t.Errorf("A 必须无法访问 B 的 secret-target.org，得到 %s（越权！）", d.Action)
+	}
+	// B 相反
+	if d, _ := guardB.Check(ctx, "webfetch", map[string]any{"url": "https://secret-target.org/"}); d.Action != "allow" {
+		t.Errorf("B 应能访问自己的 secret-target.org，得到 %s", d.Action)
+	}
+	if d, _ := guardB.Check(ctx, "webfetch", map[string]any{"url": "https://example.com/"}); d.Action != "deny" {
+		t.Errorf("B 必须无法访问 A 的 example.com，得到 %s（越权！）", d.Action)
+	}
+}
+
 func TestGuardEdgeCases(t *testing.T) {
 	database, err := db.Open(context.Background(), testDSN())
 	if err != nil {

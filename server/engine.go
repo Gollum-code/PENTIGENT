@@ -16,12 +16,13 @@ import (
 type Engine struct {
 	db     *db.DB
 	store  *db.DB
-	guard  *intercept.Guard
 	workers int
 	debounce int // planner 唤醒 debounce（ms）
 	idleTimeout time.Duration // 无变更信号时的兜底收敛检查
 	intentBudget int // 单任务最大意图数（0=不限），防真实 LLM 无限扩展烧钱
 	tokenBudget  int // 单任务最大 token 消耗（0=不限）
+	// 注意：guard 不做成共享字段 —— 每个任务必须用独立实例，
+	// 否则并发任务会互相覆盖授权范围（安全越权）。见 run()。
 
 	mu      sync.Mutex
 	running map[int64]context.CancelFunc
@@ -40,7 +41,6 @@ func NewEngine(database *db.DB, workers int) *Engine {
 	return &Engine{
 		db:          database,
 		store:       database,
-		guard:       intercept.NewGuard(database),
 		workers:     workers,
 		debounce:    500,
 		idleTimeout: 30 * time.Second,
@@ -188,9 +188,13 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 		log.Printf("engine: set running: %v", err)
 	}
 
-	// 绑定 guard 任务上下文（加载 scope / 约束）
-	if err := e.guard.Bind(ctx, taskID); err != nil {
-		log.Printf("engine: guard bind: %v", err)
+	// 每任务独立 guard：加载本任务的 scope/约束/规则。
+	// 绝不能复用共享实例 —— 并发任务会互相覆盖授权范围。
+	guard := intercept.NewGuard(e.db)
+	if err := guard.Bind(ctx, taskID); err != nil {
+		log.Printf("engine: task %d guard bind 失败，终止: %v", taskID, err)
+		_ = e.db.SetTaskStatus(ctx, taskID, "failed", "guard 初始化失败: "+err.Error())
+		return
 	}
 
 	task, err := e.db.GetTask(ctx, taskID)
@@ -231,9 +235,8 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 	if err := e.scopeFromTaskDesc(ctx, taskID, task.Description); err != nil {
 		log.Printf("engine: scope from desc: %v", err)
 	}
-	// 绑定 guard scope + 资产黑名单。Bind 失败绝不能忽略：
-	// guard 会带着未加载的黑名单/规则运行 = 安全降级（fail-open）。
-	if err := e.guard.Bind(ctx, taskID); err != nil {
+	// scope 可能被上面补齐，重绑一次让 guard 拿到最新范围（仍是本任务独立实例）
+	if err := guard.Bind(ctx, taskID); err != nil {
 		log.Printf("engine: task %d guard Bind 失败，终止以避免安全降级: %v", taskID, err)
 		_ = e.store.SetExplorationStatus(ctx, explorationID, "failed")
 		_ = e.db.SetTaskStatus(ctx, taskID, "failed", "guard 初始化失败: "+err.Error())
@@ -259,7 +262,7 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 	}
 
 	// 首次派发：把当前 open intent 交给并发 worker
-	e.dispatchAsync(ctx, taskID, explorationID, signal)
+	e.dispatchAsync(ctx, taskID, explorationID, guard, signal)
 
 	// 唤醒 planner（无状态：只读图+todolist）
 	planRes := e.planOnce(ctx, taskID, explorationID)
@@ -300,7 +303,7 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 				log.Printf("engine: 回收 %d 条卡死 intent", reclaimed)
 			}
 			// 有 open intent 就继续派发
-			e.dispatchAsync(ctx, taskID, explorationID, signal)
+			e.dispatchAsync(ctx, taskID, explorationID, guard, signal)
 			// 唤醒 planner
 			planRes = e.planOnce(ctx, taskID, explorationID)
 			if planRes.GoalProved {
@@ -313,7 +316,7 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 		case <-idle.C:
 			// 兜底：worker 异常终止未发信号。只做派发与收敛，不调 LLM
 			// （planner 仅在图变更信号到达时唤醒，避免空转烧 token）
-			e.dispatchAsync(ctx, taskID, explorationID, signal)
+			e.dispatchAsync(ctx, taskID, explorationID, guard, signal)
 		}
 		idle.Reset(e.idleTimeout)
 		hasFrontier, _ := e.store.HasOpenIntent(ctx, explorationID)
@@ -391,7 +394,7 @@ func (e *Engine) planOnce(ctx context.Context, taskID, explorationID int64) agen
 
 // dispatchAsync 并发 worker：每个 claim 一条 open intent 执行，不阻塞等待。
 // 每个 worker 完成时触发 signal（图变更 → 唤醒 planner）。
-func (e *Engine) dispatchAsync(ctx context.Context, taskID, explorationID int64, signal func()) {
+func (e *Engine) dispatchAsync(ctx context.Context, taskID, explorationID int64, guard *intercept.Guard, signal func()) {
 	for i := 0; i < e.workers; i++ {
 		if !e.acquireWorker(taskID) {
 			break // 已达并发上限
@@ -407,7 +410,7 @@ func (e *Engine) dispatchAsync(ctx context.Context, taskID, explorationID int64,
 			if intent == nil {
 				return // frontier 空，无活可干
 			}
-			e.executeIntent(ctx, taskID, explorationID, intent)
+			e.executeIntent(ctx, taskID, explorationID, guard, intent)
 		}()
 	}
 }
@@ -445,9 +448,9 @@ func (e *Engine) activeWorkers(taskID int64) int {
 }
 
 // executeIntent 单个 worker 执行一条意图
-func (e *Engine) executeIntent(ctx context.Context, taskID, explorationID int64, intent *db.Node) {
+func (e *Engine) executeIntent(ctx context.Context, taskID, explorationID int64, guard *intercept.Guard, intent *db.Node) {
 	log.Printf("engine: worker 执行意图 %d: %s", intent.ID, intent.Title)
-	res := agentWorkerRun(ctx, e, taskID, explorationID, intent)
+	res := agentWorkerRun(ctx, e, guard, taskID, explorationID, intent)
 
 	status := "done"
 	if res.Status == "blocked" {

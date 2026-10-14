@@ -56,16 +56,16 @@ func plannerRun(ctx context.Context, database *db.DB, explorationID int64, state
 	return pl.Run(ctx, NewStoreBridge(storeImpl{db: database}), explorationID, st)
 }
 
-// agentWorkerRun 运行一个 worker 直到意图完成
-func agentWorkerRun(ctx context.Context, e *Engine, taskID, explorationID int64, intent *db.Node) agent.WorkerResult {
-	// 资产归属公司：查任务真实绑定的 company_id（不再硬编码）
+// agentWorkerRun 运行一个 worker 直到意图完成。
+// guard 必须是"每任务独立"的实例：共享会在并发任务间串味（B 的 scope 覆盖 A 的 scope → 越权）。
+func agentWorkerRun(ctx context.Context, e *Engine, guard *intercept.Guard, taskID, explorationID int64, intent *db.Node) agent.WorkerResult {
 	var companyID int64
 	if task, err := e.db.GetTask(ctx, taskID); err == nil && task.CompanyID != nil {
 		companyID = *task.CompanyID
 	}
 	w := &agent.Worker{
 		Store:     NewStoreBridge(storeImpl{db: e.db}),
-		Guard:     &guardAdapter{g: e.guard},
+		Guard:     &guardAdapter{g: guard},
 		CompanyID: companyID,
 	}
 	return w.Run(ctx, taskID, explorationID, intent, 12)
