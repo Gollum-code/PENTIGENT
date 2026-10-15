@@ -42,11 +42,7 @@ export default function TaskDetail({ id }: { id: string }) {
       src.onmessage = (msg) => {
         try {
           const d = JSON.parse(msg.data);
-          // 按 id 去重：重连重放时避免重复条目
-          setEvents((prev) => {
-            if (prev.some((x) => x.id === d.id)) return prev;
-            return [...prev.slice(-199), d];
-          });
+          setEvents((prev) => [...prev.slice(-199), d]);
         } catch {}
       };
       src.onerror = () => {

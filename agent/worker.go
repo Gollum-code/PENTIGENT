@@ -102,18 +102,6 @@ func (w *Worker) Run(ctx context.Context, taskID, explorationID int64, intent *N
 			res.Status = "error"
 			res.Error = err.Error()
 			log.Printf("worker %d: llm error: %v", intent.ID, err)
-			// 失败也要留痕，否则 UI 看不到 worker 为何失败（只有 intent 变 blocked）
-			if w.Store != nil {
-				_, _ = w.Store.LogActivity(ctx, Activity{
-					TaskID:        &taskID,
-					ExplorationID: &explorationID,
-					NodeID:        &intent.ID,
-					Role:          "worker",
-					Step:          "llm_error",
-					Status:        "error",
-					Output:        map[string]any{"error": err.Error()},
-				})
-			}
 			return res
 		}
 		res.InputTokens += resp.Usage.InputTokens

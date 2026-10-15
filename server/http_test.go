@@ -219,6 +219,61 @@ func TestPaginationParams(t *testing.T) {
 }
 
 // LLM 测试端点（mock 应可用）
+func TestCSVFormulaInjectionEscaped(t *testing.T) {
+	// 漏洞标题常来自攻击者可控数据（网页标题/响应头），
+	// 以 = + - @ 开头时 Excel 会当公式执行，必须转义。
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{`=cmd|'/c calc'!A1`, `'=cmd|'/c calc'!A1`},
+		{`=HYPERLINK("http://evil","x")`, `"'=HYPERLINK(""http://evil"",""x"")"`},
+		{"@SUM(1+1)", "'@SUM(1+1)"},
+		{"+1", "'+1"},
+		{"-1", "'-1"},
+		{"normal title", "normal title"},
+		{"with,comma", `"with,comma"`},
+	}
+	for _, c := range cases {
+		if got := csvEscape(c.in); got != c.want {
+			t.Errorf("csvEscape(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestIsIP(t *testing.T) {
+	cases := map[string]bool{
+		"1.2.3.4": true, "255.255.255.255": true, "0.0.0.0": true,
+		"1.2.3": false, "1.2.3.256": false, "example.com": false, "": false,
+	}
+	for in, want := range cases {
+		if got := isIP(in); got != want {
+			t.Errorf("isIP(%q)=%v want %v", in, got, want)
+		}
+	}
+}
+
+func TestParseIntParam(t *testing.T) {
+	cases := []struct {
+		in   string
+		def  int
+		max  int
+		want int
+	}{
+		{"", 50, 200, 50},       // 空→默认
+		{"25", 50, 200, 25},     // 正常
+		{"9999", 50, 200, 200},  // 超上限→钳制
+		{"abc", 50, 200, 50},    // 非法→默认
+		{"-5", 50, 200, 50},     // 负数→默认
+		{"0", 50, 200, 0},       // 0 合法
+	}
+	for _, c := range cases {
+		if got := parseIntParam(c.in, c.def, c.max); got != c.want {
+			t.Errorf("parseIntParam(%q)=%d want %d", c.in, got, c.want)
+		}
+	}
+}
+
 func TestLLMTestEndpoint(t *testing.T) {
 	srv, d := newTestServer(t)
 	defer d.Close()
@@ -226,22 +281,6 @@ func TestLLMTestEndpoint(t *testing.T) {
 	rec := doReq(t, srv.Handler(), "POST", "/api/llm/test", "", "")
 	if rec.Code != 200 && rec.Code != 502 {
 		t.Errorf("llm/test 应返回 200 或 502, got %d", rec.Code)
-	}
-}
-
-// CSV 公式注入：LLM 分析的标题可能来自攻击者可控内容，导出时必须中和
-func TestCSVFormulaInjection(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"=HYPERLINK(\"http://evil\",\"click\")", `"'=HYPERLINK(""http://evil"",""click"")"`},
-		{"@SUM(1+1)", "'@SUM(1+1)"},
-		{"+cmd|'/c calc'!A0", "'+cmd|'/c calc'!A0"},
-		{"normal title", "normal title"},
-		{"a,b", `"a,b"`},
-	}
-	for _, c := range cases {
-		if got := csvEscape(c.in); got != c.want {
-			t.Errorf("csvEscape(%q) = %q, want %q", c.in, got, c.want)
-		}
 	}
 }
 

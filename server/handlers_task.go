@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -233,28 +232,14 @@ func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request, params
 	w.WriteHeader(200)
 
 	var lastID int64
-	// 断线重连：浏览器会带 Last-Event-ID 头，从该点续传，避免重复推送
-	if le := r.Header.Get("Last-Event-ID"); le != "" {
-		if v, err := strconv.ParseInt(le, 10, 64); err == nil {
-			lastID = v
+	// 首次立即推送最近活动
+	if rows, err := s.db.ListActivityAfter(s.ctx(), id, 0, 50); err == nil && len(rows) > 0 {
+		for _, a := range rows {
+			b, _ := json.Marshal(a)
+			fmt.Fprintf(w, "data: %s\n\n", string(b))
+			lastID = a.ID
 		}
-	}
-
-	emit := func(a db.Activity) {
-		b, _ := json.Marshal(a)
-		// 输出 id: 字段，EventSource 才能记录并在重连时回传 Last-Event-ID
-		fmt.Fprintf(w, "id: %d\ndata: %s\n\n", a.ID, string(b))
-	}
-
-	// 首次连接（无 Last-Event-ID）：推送最近 N 条（而非最早的），长任务也能看到近期活动
-	if lastID == 0 {
-		if rows, err := s.db.ListRecentActivity(s.ctx(), id, 50); err == nil && len(rows) > 0 {
-			for _, a := range rows {
-				emit(a)
-				lastID = a.ID
-			}
-			flusher.Flush()
-		}
+		flusher.Flush()
 	}
 
 	ticker := time.NewTicker(700 * time.Millisecond)
@@ -269,7 +254,8 @@ func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request, params
 				continue
 			}
 			for _, a := range rows {
-				emit(a)
+				b, _ := json.Marshal(a)
+				fmt.Fprintf(w, "data: %s\n\n", string(b))
 				lastID = a.ID
 			}
 			if len(rows) > 0 {

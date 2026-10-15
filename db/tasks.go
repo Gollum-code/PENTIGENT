@@ -372,31 +372,6 @@ func (d *DB) ListActivityAfter(ctx context.Context, taskID int64, afterID int64,
 	return out, rows.Err()
 }
 
-// ListRecentActivity 取任务最近 N 条活动（按 id 升序返回，便于顺序展示）
-func (d *DB) ListRecentActivity(ctx context.Context, taskID int64, limit int) ([]Activity, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	rows, err := d.pool.Query(ctx,
-		`SELECT id, task_id, exploration_id, node_id, role, step, tool, input, output, status, input_tokens, output_tokens, created_at::text
-		 FROM (SELECT * FROM activity WHERE task_id=$1 ORDER BY id DESC LIMIT $2) t
-		 ORDER BY id ASC`, taskID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Activity
-	for rows.Next() {
-		var a Activity
-		if err := rows.Scan(&a.ID, &a.TaskID, &a.ExplorationID, &a.NodeID, &a.Role, &a.Step, &a.Tool,
-			&a.Input, &a.Output, &a.Status, &a.InputTokens, &a.OutputTokens, &a.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
-}
-
 // SearchWorkerTraces worker 间过程级信息交换：搜其他 worker 的执行观察
 func (d *DB) SearchWorkerTraces(ctx context.Context, taskID int64, q string, limit int) ([]Activity, error) {
 	if limit <= 0 {

@@ -399,15 +399,18 @@ func (s *Server) handleTaskHistory(w http.ResponseWriter, r *http.Request, param
 
 // ---- CSV 导出 ----
 
+// csvEscape 转义 CSV 字段
 // csvEscape 转义 CSV 字段。
-// 同时防御 CSV 公式注入：以 = + - @ 或制表/回车开头的单元格会被 Excel 当作公式执行，
-// 而标题/URL 等字段来源于 LLM 对攻击者可控内容的分析，必须在前面加 ' 中和。
+// 除标准转义外，还要防公式注入：单元格以 = + - @ 或制表/回车开头时，
+// Excel/WPS 会当作公式执行。漏洞标题常来自目标可控数据（网页标题、响应头），
+// 因此必须以单引号前缀转为纯文本。
 func csvEscape(s string) string {
-	if s != "" {
-		switch s[0] {
-		case '=', '+', '-', '@', '\t', '\r':
-			s = "'" + s
-		}
+	if s == "" {
+		return s
+	}
+	// 公式注入防护：危险前缀加前导单引号
+	if r := []rune(s)[0]; r == '=' || r == '+' || r == '-' || r == '@' || r == 0x09 || r == 0x0d {
+		s = "'" + s
 	}
 	if strings.ContainsAny(s, ",\"\n\r") {
 		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`

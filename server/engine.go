@@ -67,10 +67,6 @@ func (e *Engine) Start(taskID int64) error {
 			e.mu.Lock()
 			delete(e.running, taskID)
 			e.mu.Unlock()
-			// 清理每任务 worker 计数，避免 wcount 映射随任务数无限增长
-			e.workerMu.Lock()
-			delete(e.wcount, taskID)
-			e.workerMu.Unlock()
 			cancel()
 		}()
 		e.run(ctx, taskID)
@@ -421,12 +417,6 @@ func (e *Engine) dispatchAsync(ctx context.Context, taskID, explorationID int64,
 
 // ---- worker 并发计数 ----
 
-// workerCounts 每个任务的运行中 worker 数
-type workerCounts struct {
-	mu sync.Mutex
-	n  map[int64]int
-}
-
 func (e *Engine) acquireWorker(taskID int64) bool {
 	e.workerMu.Lock()
 	defer e.workerMu.Unlock()
@@ -441,6 +431,10 @@ func (e *Engine) releaseWorker(taskID int64) {
 	e.workerMu.Lock()
 	if e.wcount[taskID] > 0 {
 		e.wcount[taskID]--
+	}
+	// 归零即删除，避免 map 随任务数无限增长
+	if e.wcount[taskID] == 0 {
+		delete(e.wcount, taskID)
 	}
 	e.workerMu.Unlock()
 }

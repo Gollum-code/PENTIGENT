@@ -135,14 +135,12 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// CORS（开发期）
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(200)
 			return
 		}
-		// 限制请求体大小，防止超大 JSON 打爆内存
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 
 		for _, rt := range s.routes() {
 			if rt.Method != r.Method {
