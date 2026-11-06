@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +30,7 @@ func (s *Server) handleListAssets(w http.ResponseWriter, r *http.Request, _ map[
 	search := q.Get("q")
 	limit := parseIntParam(q.Get("limit"), 50, 1000)
 	offset := parseIntParam(q.Get("offset"), 0, 100000)
-	assets, total, err := s.db.SearchAssets(s.ctx(), companyID, typ, search, limit, offset)
+	assets, total, err := s.db.SearchAssets(r.Context(), companyID, typ, search, limit, offset)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -49,7 +51,7 @@ func (s *Server) handleListFindings(w http.ResponseWriter, r *http.Request, _ ma
 	}
 	limit := parseIntParam(q.Get("limit"), 50, 1000)
 	offset := parseIntParam(q.Get("offset"), 0, 100000)
-	findings, total, err := s.db.ListFindings(s.ctx(), taskID, q.Get("severity"), q.Get("status"), limit, offset)
+	findings, total, err := s.db.ListFindings(r.Context(), taskID, q.Get("severity"), q.Get("status"), limit, offset)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -61,7 +63,7 @@ func (s *Server) handleListFindings(w http.ResponseWriter, r *http.Request, _ ma
 }
 
 func (s *Server) handleListCompanies(w http.ResponseWriter, r *http.Request, _ map[string]string) {
-	companies, err := s.db.ListCompanies(s.ctx())
+	companies, err := s.db.ListCompanies(r.Context())
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -76,7 +78,7 @@ func (s *Server) handlePendingList(w http.ResponseWriter, r *http.Request, _ map
 	if status == "" {
 		status = "pending"
 	}
-	pending, err := s.db.ListPending(s.ctx(), status, 200)
+	pending, err := s.db.ListPending(r.Context(), status, 200)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -88,7 +90,7 @@ func (s *Server) handlePendingList(w http.ResponseWriter, r *http.Request, _ map
 }
 
 func (s *Server) handleRulesList(w http.ResponseWriter, r *http.Request, _ map[string]string) {
-	rules, err := s.db.ListRules(s.ctx())
+	rules, err := s.db.ListRules(r.Context())
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -109,7 +111,11 @@ func (s *Server) handleInterceptDecision(w http.ResponseWriter, r *http.Request,
 		writeErr(w, 400, "无效请求体")
 		return
 	}
-	if err := s.db.DecidePending(s.ctx(), id, req.Approved); err != nil {
+	if err := s.db.DecidePending(r.Context(), id, req.Approved); err != nil {
+		if errors.Is(err, db.ErrPendingNotFound) {
+			writeErr(w, http.StatusNotFound, "记录不存在，或已被裁决/过期")
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -144,7 +150,7 @@ func (s *Server) handleAssetCoverage(w http.ResponseWriter, r *http.Request, par
 		writeErr(w, 400, "无效 id")
 		return
 	}
-	cov, err := s.db.AssetCoverage(s.ctx(), []int64{id})
+	cov, err := s.db.AssetCoverage(r.Context(), []int64{id})
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -160,24 +166,26 @@ func (s *Server) handleTaskReport(w http.ResponseWriter, r *http.Request, params
 		writeErr(w, 400, err.Error())
 		return
 	}
-	task, err := s.db.GetTask(s.ctx(), id)
+	task, err := s.db.GetTask(r.Context(), id)
 	if err != nil {
 		writeErr(w, 404, "任务不存在")
 		return
 	}
 	// 报告设置（缺省兜底）
-	settings, err := s.db.GetReportSettings(s.ctx())
+	settings, err := s.db.GetReportSettings(r.Context())
 	if err != nil {
 		settings = &db.ReportSettings{ReportTitle: "渗透测试报告", MinSeverity: "info", ShowAssets: true, ShowCoverage: true}
 	}
-	scope, _ := s.db.ListScope(s.ctx(), id)
-	explorationID, _ := s.db.ExplorationForTask(s.ctx(), id)
-	nodes, _ := s.db.ListNodes(s.ctx(), explorationID, "", "")
-	edges, _ := s.db.ListEdges(s.ctx(), explorationID)
-	assets, _, _ := s.db.SearchAssets(s.ctx(), nil, "", "", 500, 0)
+	scope, _ := s.db.ListScope(r.Context(), id)
+	explorationID, _ := s.db.ExplorationForTask(r.Context(), id)
+	nodes, _ := s.db.ListNodes(r.Context(), explorationID, "", "")
+	edges, _ := s.db.ListEdges(r.Context(), explorationID)
+	// 只取本任务覆盖到的资产（经探索锚点关联）：全局资产库是跨任务共享的，
+	// 用全表查询会把别的任务的资产混进本任务报告（失真 + 可能泄露其它授权范围）。
+	assets, _ := s.db.AssetsForTask(r.Context(), id, 500)
 
 	// 按设置过滤漏洞（严重性 + 只含已确认）
-	findings := filterFindings(s.db, s.ctx(), &id, settings)
+	findings := filterFindings(s.db, r.Context(), &id, settings)
 
 	// 锚点覆盖
 	var coverage []db.AssetCoverage
@@ -186,18 +194,18 @@ func (s *Server) handleTaskReport(w http.ResponseWriter, r *http.Request, params
 		for i, a := range assets {
 			ids[i] = a.ID
 		}
-		coverage, _ = s.db.AssetCoverage(s.ctx(), ids)
+		coverage, _ = s.db.AssetCoverage(r.Context(), ids)
 	}
 
 	report := map[string]any{
-		"task":        task,
-		"scope":       scope,
-		"nodes":       nodes,
-		"edges":       edges,
-		"assets":      assets,
-		"coverage":    coverage,
-		"findings":    findings,
-		"settings":    settings,
+		"task":         task,
+		"scope":        scope,
+		"nodes":        nodes,
+		"edges":        edges,
+		"assets":       assets,
+		"coverage":     coverage,
+		"findings":     findings,
+		"settings":     settings,
 		"generated_at": time.Now().Format(time.RFC3339),
 	}
 
@@ -369,7 +377,7 @@ func (s *Server) handleGetFinding(w http.ResponseWriter, r *http.Request, params
 		writeErr(w, 400, "无效 id")
 		return
 	}
-	fd, err := s.db.GetFindingDetail(s.ctx(), id)
+	fd, err := s.db.GetFindingDetail(r.Context(), id)
 	if err != nil {
 		writeErr(w, 404, "漏洞不存在")
 		return
@@ -386,7 +394,7 @@ func (s *Server) handleTaskHistory(w http.ResponseWriter, r *http.Request, param
 		writeErr(w, 400, err.Error())
 		return
 	}
-	hist, err := s.db.ListRunHistory(s.ctx(), id)
+	hist, err := s.db.ListRunHistory(r.Context(), id)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -433,7 +441,7 @@ func (s *Server) handleExportAssetsCSV(w http.ResponseWriter, r *http.Request, _
 			companyID = &v
 		}
 	}
-	assets, _, err := s.db.SearchAssets(s.ctx(), companyID, q.Get("type"), q.Get("q"), 10000, 0)
+	assets, _, err := s.db.SearchAssets(r.Context(), companyID, q.Get("type"), q.Get("q"), 10000, 0)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -454,7 +462,7 @@ func (s *Server) handleExportFindingsCSV(w http.ResponseWriter, r *http.Request,
 			taskID = &v
 		}
 	}
-	findings, _, err := s.db.ListFindings(s.ctx(), taskID, q.Get("severity"), q.Get("status"), 10000, 0)
+	findings, _, err := s.db.ListFindings(r.Context(), taskID, q.Get("severity"), q.Get("status"), 10000, 0)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -483,9 +491,9 @@ func (s *Server) handleGlobalSearch(w http.ResponseWriter, r *http.Request, _ ma
 		writeJSON(w, 200, map[string]any{"tasks": []any{}, "assets": []any{}, "findings": []any{}})
 		return
 	}
-	tasks, _, _ := s.db.ListTasks(s.ctx(), "", q, 10, 0)
-	assets, _, _ := s.db.SearchAssets(s.ctx(), nil, "", q, 10, 0)
-	findings, _ := s.db.SearchFindings(s.ctx(), q, 10)
+	tasks, _, _ := s.db.ListTasks(r.Context(), "", q, 10, 0)
+	assets, _, _ := s.db.SearchAssets(r.Context(), nil, "", q, 10, 0)
+	findings, _ := s.db.SearchFindings(r.Context(), q, 10)
 	if tasks == nil {
 		tasks = []db.Task{}
 	}
@@ -501,7 +509,7 @@ func (s *Server) handleGlobalSearch(w http.ResponseWriter, r *http.Request, _ ma
 // ---- 模板 / 报告设置 / API 文档 ----
 
 func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request, _ map[string]string) {
-	templates, err := s.db.ListTaskTemplates(s.ctx())
+	templates, err := s.db.ListTaskTemplates(r.Context())
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -523,7 +531,7 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request, _ 
 		return
 	}
 	t.Builtin = false
-	id, err := s.db.CreateTaskTemplate(s.ctx(), t)
+	id, err := s.db.CreateTaskTemplate(r.Context(), t)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -546,7 +554,7 @@ func (s *Server) handleUpdateTemplate(w http.ResponseWriter, r *http.Request, pa
 		writeErr(w, 400, "name 和 goal 必填")
 		return
 	}
-	if err := s.db.UpdateTaskTemplate(s.ctx(), id, t); err != nil {
+	if err := s.db.UpdateTaskTemplate(r.Context(), id, t); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -559,7 +567,7 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request, pa
 		writeErr(w, 400, "无效 id")
 		return
 	}
-	if err := s.db.DeleteTaskTemplate(s.ctx(), id); err != nil {
+	if err := s.db.DeleteTaskTemplate(r.Context(), id); err != nil {
 		// 内置模板 / 不存在 → 400 明确报错，而不是静默 200
 		writeErr(w, 400, err.Error())
 		return
@@ -568,7 +576,7 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request, pa
 }
 
 func (s *Server) handleGetReportSettings(w http.ResponseWriter, r *http.Request, _ map[string]string) {
-	rs, err := s.db.GetReportSettings(s.ctx())
+	rs, err := s.db.GetReportSettings(r.Context())
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -582,7 +590,7 @@ func (s *Server) handleUpdateReportSettings(w http.ResponseWriter, r *http.Reque
 		writeErr(w, 400, "无效请求体")
 		return
 	}
-	if err := s.db.UpdateReportSettings(s.ctx(), rs); err != nil {
+	if err := s.db.UpdateReportSettings(r.Context(), rs); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -614,7 +622,7 @@ func (s *Server) handleFindingStatus(w http.ResponseWriter, r *http.Request, par
 		writeErr(w, 400, "status 必须是 confirmed 或 dismissed")
 		return
 	}
-	if err := s.db.SetFindingStatus(s.ctx(), id, req.Status); err != nil {
+	if err := s.db.SetFindingStatus(r.Context(), id, req.Status); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -628,7 +636,7 @@ func (s *Server) handleDeleteFinding(w http.ResponseWriter, r *http.Request, par
 		writeErr(w, 400, "无效 id")
 		return
 	}
-	if err := s.db.DeleteFinding(s.ctx(), id); err != nil {
+	if err := s.db.DeleteFinding(r.Context(), id); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -658,12 +666,48 @@ func (s *Server) handleCreateRule(w http.ResponseWriter, r *http.Request, _ map[
 	if rule.Priority == 0 {
 		rule.Priority = 100
 	}
-	id, err := s.db.CreateRule(s.ctx(), rule)
+	// 规则默认启用：bool 零值是 false，若不强制设为 true，UI 建出的每条规则
+	// 都是"禁用"的，形同虚设（也不会有任何报错提示）。
+	rule.Enabled = true
+	if err := validateInterceptRule(rule); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	id, err := s.db.CreateRule(r.Context(), rule)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"id": id, "created": true})
+	writeJSON(w, 200, map[string]any{"id": id, "created": true, "enabled": true})
+}
+
+// validateInterceptRule 校验规则字段取值与正则可用性。
+// 坏正则此前会被静默存库、匹配时永远失败 —— 一条 deny 规则"看起来生效但从不命中"，
+// 这是安全上最危险的静默失效，必须在写入前拦下。
+func validateInterceptRule(rule db.InterceptRule) error {
+	switch rule.MatchTarget {
+	case "tool_name", "tool_input":
+	default:
+		return fmt.Errorf("match_target 必须是 tool_name 或 tool_input")
+	}
+	switch rule.MatchType {
+	case "string":
+	case "regex":
+		if _, err := regexp.Compile(rule.Pattern); err != nil {
+			return fmt.Errorf("pattern 不是合法正则: %v", err)
+		}
+	default:
+		return fmt.Errorf("match_type 必须是 string 或 regex")
+	}
+	switch rule.Action {
+	case "allow", "deny", "ask":
+	default:
+		return fmt.Errorf("action 必须是 allow/deny/ask")
+	}
+	if rule.Priority < 0 || rule.Priority > 1000000 {
+		return fmt.Errorf("priority 取值非法")
+	}
+	return nil
 }
 
 // handleDeleteRule 删除审批规则
@@ -673,7 +717,7 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request, params
 		writeErr(w, 400, "无效 id")
 		return
 	}
-	if err := s.db.DeleteRule(s.ctx(), id); err != nil {
+	if err := s.db.DeleteRule(r.Context(), id); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}

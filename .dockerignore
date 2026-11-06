@@ -1,0 +1,14 @@
+.git
+.gitignore
+.gitattributes
+.github
+web/node_modules
+web/.next
+web/out
+web/tsconfig.tsbuildinfo
+webui/dist
+logs
+*.exe
+*.exe~
+*.log
+tmp

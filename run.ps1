@@ -117,7 +117,7 @@ if (Test-Path "$root\web\package.json") {
 }
 # 后端单二进制
 Write-Output "  [后端] go build ..."
-& $go build -o "$root\pentigent.exe" ./cmd/pentigent
+& $go build -ldflags "-X pentigent/server.Version=dev" -o "$root\pentigent.exe" ./cmd/pentigent
 if ($LASTEXITCODE -ne 0) { Write-Output "  后端构建失败"; exit 1 }
 Write-Output "  pentigent.exe 构建完成 ($([math]::Round((Get-Item "$root\pentigent.exe").Length/1MB,1)) MB)"
 

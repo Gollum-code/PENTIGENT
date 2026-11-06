@@ -4,7 +4,8 @@
   },
   "skill_dir": "skills",
   "server": {
-    "addr": ":8080"
+    "addr": ":8080",
+    "allowed_origins": []
   },
   "auth": {
     "disabled": true,
@@ -13,10 +14,21 @@
   "agent": {
     "workers": 4,
     "debounce_ms": 500,
-    "mock_write_probe": false
+    "mock_write_probe": false,
+    "intent_budget": 15,
+    "token_budget": 150000,
+    "max_rounds": 12,
+    "max_runtime_sec": 1800
+  },
+  "tools": {
+    "user_agent": "",
+    "bash_timeout_sec": 30
   },
   "llm": {
-    "profile": "openai"
+    "profile": "default-mock"
+  },
+  "notify": {
+    "webhook_url": ""
   },
   "log": {
     "file": "logs/pentigent.log",

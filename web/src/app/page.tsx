@@ -1,10 +1,13 @@
 "use client";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api, apiSafe, useAuth, useToast } from "@/lib/store";
 import Nav from "@/components/Nav";
 import Pagination from "@/components/Pagination";
 import StatsBar from "@/components/StatsBar";
+import TaskDetail from "@/components/TaskDetail";
+import FindingDetail from "@/components/FindingDetail";
 
 // 任务状态徽章配色：done=绿 / incomplete=橙 / failed=红 / running=绿闪 / 其他=灰
 function statusStyle(status: string): { bg: string; fg: string } {
@@ -290,6 +293,14 @@ function Dashboard() {
   );
 }
 
+// 静态导出只有有限个预生成路由（/tasks/1..100、/findings/1..200）。
+// webui 的 SPA 兜底会把未知路径回落到本页，因此这里按当前路径做客户端路由分发，
+// 保证 id 超出预生成范围时仍能打开正确的任务/漏洞详情。
 export default function Page() {
+  const pathname = (usePathname() || "/").replace(/\/+$/, "");
+  let m = pathname.match(/^\/tasks\/(\d+)$/);
+  if (m) return <TaskDetail id={m[1]} />;
+  m = pathname.match(/^\/findings\/(\d+)$/);
+  if (m) return <FindingDetail id={m[1]} />;
   return <Dashboard />;
 }

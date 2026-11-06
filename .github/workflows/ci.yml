@@ -34,17 +34,59 @@ jobs:
           go-version: "1.27"
           cache: true
 
+      - name: Gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未 gofmt："
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: Build
-        run: go build -v ./...
+        run: go build -v -ldflags "-X pentigent/server.Version=ci-${GITHUB_SHA::7}" ./...
 
       - name: Vet
         run: go vet ./...
 
-      - name: Test
+      - name: Test (race)
         env:
           # 测试会连本地 PG
           PENTIGENT_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/pentigent?sslmode=disable
-        run: go test -cover ./...
+        run: go test -race -cover ./...
+
+      - name: E2E smoke (mock LLM)
+        env:
+          PENTIGENT_DSN: postgres://postgres:postgres@127.0.0.1:5432/pentigent?sslmode=disable
+          PENTIGENT_ADDR: ":8080"
+          PENTIGENT_AUTH_DISABLED: "true"
+          PENTIGENT_LLM_PROFILE: default-mock
+        run: |
+          set -euo pipefail
+          go build -ldflags "-X pentigent/server.Version=ci-${GITHUB_SHA::7}" -o /tmp/pentigent ./cmd/pentigent
+          /tmp/pentigent config.json > /tmp/pentigent.log 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/api/health >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/api/health | jq -e '.status=="ok" or .status=="degraded"' >/dev/null
+          TID=$(curl -sf -X POST http://127.0.0.1:8080/api/tasks \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"ci-e2e","goal":"probe example.com","description":"authorized ci test","scope":["example.com"]}' \
+            | jq -r .id)
+          test -n "$TID"
+          curl -sf -X POST "http://127.0.0.1:8080/api/tasks/$TID/start" >/dev/null
+          STATUS=""
+          for i in $(seq 1 90); do
+            STATUS=$(curl -sf "http://127.0.0.1:8080/api/tasks/$TID" | jq -r .task.status)
+            case "$STATUS" in done|incomplete|failed|stopped) break;; esac
+            sleep 2
+          done
+          echo "e2e final status=$STATUS"
+          test "$STATUS" = "done"
+          curl -sf -X DELETE "http://127.0.0.1:8080/api/tasks/$TID" >/dev/null
 
   web:
     name: Frontend build
@@ -60,4 +102,17 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+      - run: npx tsc --noEmit
       - run: npm run build
+
+      # 把静态导出产物嵌入 webui/dist，再验证 Go 单二进制能正常构建
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.27"
+          cache: true
+      - name: Embed frontend & build binary
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p webui/dist
+          cp -r web/out/. webui/dist/
+          go build -v -ldflags "-X pentigent/server.Version=ci-${GITHUB_SHA::7}" -o /tmp/pentigent ./cmd/pentigent

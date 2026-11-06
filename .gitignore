@@ -23,3 +23,6 @@ Thumbs.db
 s.js
 curl_err.txt
 fav.ico
+
+# tsc ÔöÁ¿»º´æ
+web/tsconfig.tsbuildinfo

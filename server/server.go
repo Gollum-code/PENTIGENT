@@ -3,10 +3,13 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +20,17 @@ import (
 	"pentigent/db"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
+
+// Version 构建版本（可通过 -ldflags "-X pentigent/server.Version=x.y.z" 注入）
+var Version = "0.1.0"
+
+// maxBodyBytes 请求体大小上限（防超大 body 打内存/DoS）
+const maxBodyBytes = 1 << 20 // 1 MiB
+
+// setupLockID 收敛并发首次设置（advisory xact lock）
+const setupLockID int64 = 7271_0002
 
 type Server struct {
 	cfg    *config.Config
@@ -27,11 +40,18 @@ type Server struct {
 	serveStatic http.Handler
 
 	// LLM 健康缓存（避免 health 被 LLM 延迟阻塞）
-	llmMu         sync.Mutex
-	lastLLMCheck  time.Time
-	lastLLMOK     bool
+	llmMu          sync.Mutex
+	lastLLMCheck   time.Time
+	lastLLMOK      bool
 	lastLLMLatency float64
 	lastLLMInfo    string
+
+	// 登录 / 免鉴权 LLM 探测限流
+	loginLimiter *rateLimiter
+	llmLimiter   *rateLimiter
+
+	// SSE 单轮询广播
+	sse *sseHub
 }
 
 // refreshLLM 后台探测 LLM 连通性并更新缓存
@@ -64,7 +84,29 @@ type route struct {
 
 func NewServer(cfg *config.Config, database *db.DB) *Server {
 	engine := NewEngine(database, cfg.Agent.Workers)
-	return &Server{cfg: cfg, db: database, engine: engine}
+	// 引擎参数从配置注入（0 = 保持默认/不限，见 Engine 字段语义）
+	if cfg.Agent.Debounce > 0 {
+		engine.debounce = cfg.Agent.Debounce
+	}
+	if cfg.Agent.IntentBudget >= 0 {
+		engine.intentBudget = cfg.Agent.IntentBudget
+	}
+	if cfg.Agent.TokenBudget >= 0 {
+		engine.tokenBudget = cfg.Agent.TokenBudget
+	}
+	if cfg.Agent.MaxRounds > 0 {
+		engine.maxRounds = cfg.Agent.MaxRounds
+	}
+	// 0 = 不限；配置来自 config.Default()/JSON，缺省为 30 分钟
+	engine.maxRuntime = time.Duration(cfg.Agent.MaxRuntimeSec) * time.Second
+	return &Server{
+		cfg:          cfg,
+		db:           database,
+		engine:       engine,
+		loginLimiter: newRateLimiter(10, time.Minute),
+		llmLimiter:   newRateLimiter(10, time.Minute),
+		sse:          newSSEHub(database),
+	}
 }
 
 func (s *Server) Engine() *Engine { return s.engine }
@@ -133,12 +175,46 @@ func (s *Server) routes() []route {
 
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// CORS（开发期）
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+		// 请求日志（只记 path，不记 query，避免 token/敏感参数进日志）
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w}
+		w = rec
+		defer func() {
+			log.Printf("http: %s %s %d %dB %s",
+				r.Method, r.URL.Path, rec.status, rec.bytes, time.Since(start).Round(time.Millisecond))
+		}()
+
+		// 基础安全头（前端是静态内嵌单二进制，同源；CSP 收紧到 self）
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'")
+
+		// 请求体大小上限（JSON 解码器无法自行限制）
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		}
+
+		// CORS：前端由 go:embed 同源提供，正常不需要跨域。
+		// 通配符 "*" 配合支持 cookie 的鉴权接口会被第三方站点的脚本滥用（带凭据请求），
+		// 因此只在"同源（origin host == 本服务 host）"或"显式配置进白名单"时回显 origin。
+		w.Header().Add("Vary", "Origin")
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if u, err := url.Parse(origin); err == nil && (strings.EqualFold(u.Host, r.Host) || s.originAllowed(origin)) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+			}
+		}
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(200)
+			return
+		}
+
+		// CSRF：cookie 鉴权的状态变更请求必须同源（Authorization 客户端不受影响）
+		if !sameOriginOK(r) {
+			writeErr(w, http.StatusForbidden, "跨站请求被拒绝")
 			return
 		}
 
@@ -159,6 +235,12 @@ func (s *Server) Handler() http.Handler {
 			rt.Handler(w, r, params)
 			return
 		}
+		// API 路径没命中任何路由：返回 JSON 404，不能兜底到 SPA 的 index.html
+		//（否则前端收到 HTML 当作数据解析、报错信息也难排查）。
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			writeErr(w, http.StatusNotFound, "接口不存在: "+r.Method+" "+r.URL.Path)
+			return
+		}
 		// 静态资源兜底交给前端（若已内嵌）
 		if s.serveStatic != nil {
 			s.serveStatic.ServeHTTP(w, r)
@@ -170,43 +252,115 @@ func (s *Server) Handler() http.Handler {
 
 // ---- 认证 ----
 
-func (s *Server) hashPassword(password string) string {
-	h := sha256.Sum256([]byte(password + s.cfg.Auth.JWTSecret))
-	return hex.EncodeToString(h[:])
+// passwordHash 用 bcrypt 生成口令哈希（自带随机盐，慢哈希，抗暴力破解）。
+func passwordHash(password string) (string, error) {
+	h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(h), err
 }
 
-func (s *Server) isSetup() bool {
+// verifyPassword 校验口令，并兼容升级前的 SHA-256 哈希。
+// 返回 (ok, upgradedHash)：ok 且 upgradedHash 非空时，调用方应把新 bcrypt 哈希写回。
+func (s *Server) verifyPassword(stored, password string) (bool, string) {
+	if strings.HasPrefix(stored, "$2") {
+		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(password)) == nil, ""
+	}
+	// 旧版：sha256(password + jwtSecret)，登录成功后立刻升级为 bcrypt
+	h := sha256.Sum256([]byte(password + s.cfg.Auth.JWTSecret))
+	expect := hex.EncodeToString(h[:])
+	if subtle.ConstantTimeCompare([]byte(expect), []byte(stored)) != 1 {
+		return false, ""
+	}
+	if upgraded, err := passwordHash(password); err == nil {
+		return true, upgraded
+	}
+	return true, ""
+}
+
+// setAuthCookie 登录成功后写 HttpOnly cookie：同源 EventSource/下载链接会自动携带。
+// 同时仍返回 token，兼容命令行/API 客户端用 Authorization 头。
+func (s *Server) setAuthCookie(w http.ResponseWriter, token string, secure bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "pentigent_token",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int((24 * time.Hour).Seconds()),
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (s *Server) isSetup(ctx context.Context) bool {
 	var v []byte
-	err := s.db.Pool().QueryRow(s.ctx(), `SELECT value FROM settings WHERE key='admin'`).Scan(&v)
+	err := s.db.Pool().QueryRow(ctx, `SELECT value FROM settings WHERE key='admin'`).Scan(&v)
 	return err == nil && len(v) > 0
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request, _ map[string]string) {
-	if s.isSetup() {
+	if ok, retry := s.loginLimiter.allow(clientIP(r)); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		writeErr(w, http.StatusTooManyRequests, "尝试过于频繁，请稍后再试")
+		return
+	}
+	if s.isSetup(r.Context()) {
 		writeErr(w, http.StatusBadRequest, "已完成初始设置")
 		return
 	}
 	var req struct {
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Password == "" {
-		writeErr(w, http.StatusBadRequest, "无效请求")
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Password) < 6 {
+		writeErr(w, http.StatusBadRequest, "密码至少 6 位")
 		return
 	}
-	pwHash := s.hashPassword(req.Password)
-	_, err := s.db.Pool().Exec(s.ctx(),
-		`INSERT INTO settings (key, value) VALUES ('admin', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`,
-		`{"password":"`+pwHash+`"}`)
+	pwHash, err := passwordHash(req.Password)
+	if err != nil {
+		writeErr(w, 500, "生成密码哈希失败")
+		return
+	}
+	// 事务 + advisory lock：并发 setup 只会有一个成功，避免后到者覆盖先到者密码。
+	tx, err := s.db.Pool().Begin(r.Context())
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	// 设置完成直接签发 token
-	token, _ := s.issueToken()
+	defer tx.Rollback(r.Context())
+	if _, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock($1)`, setupLockID); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	// 事务内重查：锁后再次确认，避免并发 setup 覆盖
+	var v []byte
+	if err := tx.QueryRow(r.Context(), `SELECT value FROM settings WHERE key='admin'`).Scan(&v); err == nil && len(v) > 0 {
+		writeErr(w, http.StatusBadRequest, "已完成初始设置")
+		return
+	}
+	if _, err := tx.Exec(r.Context(),
+		`INSERT INTO settings (key, value) VALUES ('admin', $1::jsonb)
+		 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`,
+		`{"password":`+strconv.Quote(pwHash)+`}`); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	token, err := s.issueToken()
+	if err != nil {
+		writeErr(w, 500, "签发 token 失败")
+		return
+	}
+	s.setAuthCookie(w, token, isSecureRequest(r))
 	writeJSON(w, 200, map[string]any{"token": token, "setup": true})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+	if ok, retry := s.loginLimiter.allow(clientIP(r)); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		writeErr(w, http.StatusTooManyRequests, "尝试过于频繁，请稍后再试")
+		return
+	}
 	var req struct {
 		Password string `json:"password"`
 	}
@@ -215,18 +369,32 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request, _ map[strin
 		return
 	}
 	var raw []byte
-	err := s.db.Pool().QueryRow(s.ctx(), `SELECT value FROM settings WHERE key='admin'`).Scan(&raw)
+	err := s.db.Pool().QueryRow(r.Context(), `SELECT value FROM settings WHERE key='admin'`).Scan(&raw)
 	if err != nil {
 		writeErr(w, http.StatusUnauthorized, "尚未初始化")
 		return
 	}
-	var admin struct{ Password string `json:"password"` }
+	var admin struct {
+		Password string `json:"password"`
+	}
 	_ = json.Unmarshal(raw, &admin)
-	if admin.Password != s.hashPassword(req.Password) {
+	ok, upgraded := s.verifyPassword(admin.Password, req.Password)
+	if !ok {
 		writeErr(w, http.StatusUnauthorized, "密码错误")
 		return
 	}
-	token, _ := s.issueToken()
+	// 旧 SHA-256 哈希登录成功后自动升级
+	if upgraded != "" {
+		_, _ = s.db.Pool().Exec(r.Context(),
+			`UPDATE settings SET value=$1::jsonb WHERE key='admin'`,
+			`{"password":`+strconv.Quote(upgraded)+`}`)
+	}
+	token, err := s.issueToken()
+	if err != nil {
+		writeErr(w, 500, "签发 token 失败")
+		return
+	}
+	s.setAuthCookie(w, token, isSecureRequest(r))
 	writeJSON(w, 200, map[string]any{"token": token})
 }
 
@@ -240,13 +408,29 @@ func (s *Server) issueToken() (string, error) {
 	return t.SignedString([]byte(s.cfg.Auth.JWTSecret))
 }
 
+// checkAuth 依次尝试：Authorization 头 → cookie → SSE 的 ?token=。
+// SSE（EventSource）无法设置请求头，因此仅对 /events 路径允许查询参数兜底。
 func (s *Server) checkAuth(r *http.Request) bool {
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
+	var tokenStr string
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		tokenStr = strings.TrimPrefix(auth, "Bearer ")
+	}
+	if tokenStr == "" {
+		if c, err := r.Cookie("pentigent_token"); err == nil {
+			tokenStr = c.Value
+		}
+	}
+	if tokenStr == "" && strings.HasSuffix(r.URL.Path, "/events") {
+		tokenStr = r.URL.Query().Get("token")
+	}
+	if tokenStr == "" {
 		return false
 	}
-	tokenStr := strings.TrimPrefix(auth, "Bearer ")
+	// 显式限定签名算法，避免 alg 混淆类攻击
 	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+		if t.Method != jwt.SigningMethodHS256 {
+			return nil, fmt.Errorf("unexpected signing method: %s", t.Method.Alg())
+		}
 		return []byte(s.cfg.Auth.JWTSecret), nil
 	})
 	return err == nil && token.Valid
@@ -262,7 +446,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ map[stri
 	dbOK := true
 	var dbMs float64
 	start := time.Now()
-	if err := s.db.Pool().Ping(s.ctx()); err != nil {
+	if err := s.db.Pool().Ping(r.Context()); err != nil {
 		dbOK = false
 	}
 	dbMs = float64(time.Since(start).Microseconds()) / 1000
@@ -278,16 +462,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ map[stri
 		go s.refreshLLM(prov)
 	}
 
-	// 运行中任务数 / 待审批积压
+	// 运行中任务数 / 待审批积压（直接 COUNT，避免拉全表只为计数）
 	running := s.engine.RunningCount()
 	pendingCount := 0
-	if rows, err := s.db.ListPending(s.ctx(), "pending", 1); err == nil {
-		pendingCount = len(rows)
-		if pendingCount > 0 {
-			if all, _ := s.db.ListPending(s.ctx(), "pending", 1000); len(all) > pendingCount {
-				pendingCount = len(all)
-			}
-		}
+	if err := s.db.Pool().QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM intercept_pending WHERE status='pending'`).Scan(&pendingCount); err != nil {
+		log.Printf("health: count pending: %v", err)
 	}
 
 	status := "ok"
@@ -297,10 +477,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ map[stri
 
 	writeJSON(w, 200, map[string]any{
 		"status":        status,
-		"version":       "0.1.0",
+		"version":       Version,
 		"llm":           prov.Name(),
 		"mock":          prov.Name() == "mock",
-		"setup":         s.isSetup(),
+		"setup":         s.isSetup(r.Context()),
 		"auth_disabled": s.cfg.Auth.Disabled,
 		"time":          time.Now().Format(time.RFC3339),
 		"db":            map[string]any{"ok": dbOK, "latency_ms": dbMs},
@@ -310,6 +490,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ map[stri
 }
 
 func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+	// 免鉴权端点，限制调用频率，避免被用来消耗上游 token / 探测端点
+	if ok, retry := s.llmLimiter.allow(clientIP(r)); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		writeErr(w, http.StatusTooManyRequests, "LLM 探测过于频繁，请稍后再试")
+		return
+	}
 	prov := agent.CurrentProvider()
 	info, err := prov.Ping(r.Context())
 	if err != nil {
@@ -317,6 +503,20 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request, _ map[str
 		return
 	}
 	writeJSON(w, 200, map[string]any{"llm": prov.Name(), "info": info, "mock": prov.Name() == "mock"})
+}
+
+// originAllowed 判断 origin 是否在显式跨域白名单内（server.allowed_origins / PENTIGENT_ALLOWED_ORIGINS）。
+func (s *Server) originAllowed(origin string) bool {
+	if s.cfg == nil {
+		return false
+	}
+	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+	for _, o := range s.cfg.Server.AllowedOrigins {
+		if strings.EqualFold(strings.TrimRight(strings.TrimSpace(o), "/"), origin) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- 工具函数 ----

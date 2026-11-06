@@ -31,6 +31,8 @@ type Store interface {
 	ProveGoals(ctx context.Context, explorationID int64, goalIDs []int64) error
 	SetNodeStatus(ctx context.Context, id int64, status string) error
 	ClaimNextIntent(ctx context.Context, explorationID int64, workerID string) (*Node, error)
+	// TouchIntent 续约 running intent 的 claimed_at，避免长时间执行时被回收重领
+	TouchIntent(ctx context.Context, intentID int64) error
 	AddEdge(ctx context.Context, explorationID, fromID, toID int64, relation string) error
 	Anchor(ctx context.Context, explorationID, nodeID, assetID int64) error
 	HasOpenIntent(ctx context.Context, explorationID int64) (bool, error)
@@ -49,6 +51,7 @@ type Store interface {
 	// 审批
 	EnqueueIntercept(ctx context.Context, p PendingIntercept) (int64, error)
 	GetPendingStatus(ctx context.Context, id int64) (string, error)
+	ExpirePending(ctx context.Context, id int64) error
 }
 
 // ---- Provider 全局单例（engine 启动时注入）----

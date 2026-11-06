@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { apiSafe } from "@/lib/store";
+import { apiSafe, apiText, useToast } from "@/lib/store";
 import Nav from "@/components/Nav";
 import Pagination from "@/components/Pagination";
 
@@ -52,6 +52,7 @@ export default function Findings() {
   };
 
   const remove = async (f: any) => {
+    if (!confirm(`确认删除漏洞「${f.title}」？删除后不可恢复。`)) return;
     const d = await apiSafe(`/api/findings/${f.id}`, { method: "DELETE" }, "漏洞记录已删除");
     if (d) load(page);
   };
@@ -63,6 +64,21 @@ export default function Findings() {
     if (status) p.set("status", status);
     const s = p.toString();
     return s ? `?${s}` : "";
+  };
+
+  // CSV 走带鉴权的 fetch：<a href> 不会带 Authorization 头，开启鉴权后会 401
+  const exportCsv = async () => {
+    try {
+      const text = await apiText(`/api/export/findings.csv${buildFindingsQuery()}`);
+      const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "findings.csv";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e: any) {
+      useToast.getState().show("导出失败: " + (e?.message || "网络错误"));
+    }
   };
 
   return (
@@ -84,6 +100,10 @@ export default function Findings() {
             <option value="confirmed">已确认</option>
             <option value="dismissed">误报</option>
           </select>
+          <span style={{ flex: 1 }} />
+          <button className="btn ghost" onClick={exportCsv}>
+            导出CSV（当前筛选）
+          </button>
         </div>
         <table style={{ marginTop: 12 }}>
           <thead>
@@ -120,12 +140,6 @@ export default function Findings() {
                   <button className="btn ghost" onClick={() => toggleStatus(f)}>
                     {f.status === "dismissed" ? "重新确认" : "标记误报"}
                   </button>
-                  <a
-                    className="btn ghost"
-                    href={`/api/export/findings.csv${buildFindingsQuery()}`}
-                  >
-                    导出CSV
-                  </a>
                   <button className="btn danger" onClick={() => remove(f)}>
                     删除
                   </button>

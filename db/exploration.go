@@ -9,21 +9,21 @@ import (
 )
 
 type Node struct {
-	ID          int64          `json:"id"`
-	ExplorationID int64        `json:"exploration_id"`
-	Type        string         `json:"type"`
-	Status      string         `json:"status"`
-	Title       string         `json:"title"`
-	Content     map[string]any `json:"content,omitempty"`
-	WorkerID    string         `json:"worker_id,omitempty"`
-	CreatedAt   string         `json:"created_at,omitempty"`
+	ID            int64          `json:"id"`
+	ExplorationID int64          `json:"exploration_id"`
+	Type          string         `json:"type"`
+	Status        string         `json:"status"`
+	Title         string         `json:"title"`
+	Content       map[string]any `json:"content,omitempty"`
+	WorkerID      string         `json:"worker_id,omitempty"`
+	CreatedAt     string         `json:"created_at,omitempty"`
 }
 
 type Edge struct {
-	ID           int64  `json:"id"`
-	FromNodeID   int64  `json:"from_node_id"`
-	ToNodeID     int64  `json:"to_node_id"`
-	Relation     string `json:"relation"`
+	ID         int64  `json:"id"`
+	FromNodeID int64  `json:"from_node_id"`
+	ToNodeID   int64  `json:"to_node_id"`
+	Relation   string `json:"relation"`
 }
 
 type Exploration struct {
@@ -195,6 +195,15 @@ func (d *DB) ClaimNextIntent(ctx context.Context, explorationID int64, workerID 
 		return nil, err
 	}
 	return d.GetNode(ctx, id)
+}
+
+// TouchIntent 心跳续约：worker 每轮 LLM 调用前刷新 claimed_at。
+// 正常执行中的长意图（多轮 LLM + 审批等待）不会超过回收窗口，避免被
+// ReclaimStuckIntents 误判为"卡死"而重领，造成同一意图被并发执行两次。
+func (d *DB) TouchIntent(ctx context.Context, intentID int64) error {
+	_, err := d.pool.Exec(ctx,
+		`UPDATE exploration_nodes SET claimed_at=now() WHERE id=$1 AND status='running'`, intentID)
+	return err
 }
 
 // ReclaimStuckIntents 回收超时未完成的 intent（worker 崩溃/进程被杀）。

@@ -2,21 +2,22 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
 type Finding struct {
-	ID           int64          `json:"id"`
-	TaskID       *int64         `json:"task_id,omitempty"`
-	TaskName     string         `json:"task_name,omitempty"`
-	ExplorationID *int64        `json:"exploration_id,omitempty"`
-	NodeID       *int64         `json:"node_id,omitempty"`
-	AssetID      *int64         `json:"asset_id,omitempty"`
-	Title        string         `json:"title"`
-	Severity     string         `json:"severity"`
-	Status       string         `json:"status"`
-	Evidence     map[string]any `json:"evidence,omitempty"`
-	CreatedAt    string         `json:"created_at,omitempty"`
+	ID            int64          `json:"id"`
+	TaskID        *int64         `json:"task_id,omitempty"`
+	TaskName      string         `json:"task_name,omitempty"`
+	ExplorationID *int64         `json:"exploration_id,omitempty"`
+	NodeID        *int64         `json:"node_id,omitempty"`
+	AssetID       *int64         `json:"asset_id,omitempty"`
+	Title         string         `json:"title"`
+	Severity      string         `json:"severity"`
+	Status        string         `json:"status"`
+	Evidence      map[string]any `json:"evidence,omitempty"`
+	CreatedAt     string         `json:"created_at,omitempty"`
 }
 
 // ReportFinding 写漏洞节点：先去重（同 title+task 已存在则返回既有）
@@ -138,10 +139,10 @@ func (d *DB) DeleteFinding(ctx context.Context, id int64) error {
 // FindingDetail 漏洞详情：含关联资产、发现它的意图节点
 type FindingDetail struct {
 	Finding
-	Asset        *Asset `json:"asset,omitempty"`
-	IntentTitle  string `json:"intent_title,omitempty"`
-	IntentID     *int64 `json:"intent_id,omitempty"`
-	TaskGoal     string `json:"task_goal,omitempty"`
+	Asset       *Asset `json:"asset,omitempty"`
+	IntentTitle string `json:"intent_title,omitempty"`
+	IntentID    *int64 `json:"intent_id,omitempty"`
+	TaskGoal    string `json:"task_goal,omitempty"`
 }
 
 // GetFindingDetail 取单条漏洞详情（含证据链：资产 / 发现它的意图）
@@ -254,19 +255,21 @@ func (d *DB) ListPending(ctx context.Context, status string, limit int) ([]Pendi
 	if limit <= 0 {
 		limit = 100
 	}
+	where := `WHERE TRUE`
+	var args []any
+	idx := 1
+	if status != "" {
+		args = append(args, status)
+		where += fmt.Sprintf(" AND p.status=$%d", idx)
+		idx++
+	}
+	args = append(args, limit)
 	sql := `SELECT p.id, p.task_id, COALESCE(t.name,'') AS task_name, p.node_id,
 			COALESCE(n.title,'') AS intent_title, p.tool, p.input, p.rule_id, p.reason, p.status, p.created_at::text
 		FROM intercept_pending p
 		LEFT JOIN tasks t ON t.id = p.task_id
 		LEFT JOIN exploration_nodes n ON n.id = p.node_id
-		WHERE TRUE`
-	var args []any
-	if status != "" {
-		args = append(args, status)
-		sql += " AND p.status=$1"
-	}
-	args = append(args, limit)
-	sql += " ORDER BY p.id DESC LIMIT $2"
+		` + where + fmt.Sprintf(" ORDER BY p.id DESC LIMIT $%d", idx)
 	rows, err := d.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
@@ -286,7 +289,7 @@ func (d *DB) ListPending(ctx context.Context, status string, limit int) ([]Pendi
 func (d *DB) GetPending(ctx context.Context, id int64) (*PendingIntercept, error) {
 	var p PendingIntercept
 	err := d.pool.QueryRow(ctx,
-		`SELECT id, task_id, node_id, tool, input, rule_id, reason, status, created_at
+		`SELECT id, task_id, node_id, tool, input, rule_id, reason, status, created_at::text
 		 FROM intercept_pending WHERE id=$1`, id).
 		Scan(&p.ID, &p.TaskID, &p.NodeID, &p.Tool, &p.Input, &p.RuleID, &p.Reason, &p.Status, &p.CreatedAt)
 	if err != nil {
@@ -295,14 +298,33 @@ func (d *DB) GetPending(ctx context.Context, id int64) (*PendingIntercept, error
 	return &p, nil
 }
 
+// ExpirePending 把超时未裁决的审批标记为 expired（仅当仍是 pending）。
+// 避免审批队列永远堆积等待中但 worker 已放弃的僵尸记录。
+func (d *DB) ExpirePending(ctx context.Context, id int64) error {
+	_, err := d.pool.Exec(ctx,
+		`UPDATE intercept_pending SET status='expired', decided_at=now() WHERE id=$1 AND status='pending'`, id)
+	return err
+}
+
+// ErrPendingNotFound 待审批记录不存在，或已被裁决/过期。
+var ErrPendingNotFound = errors.New("pending 不存在或已被裁决")
+
 func (d *DB) DecidePending(ctx context.Context, id int64, approved bool) error {
 	status := "denied"
 	if approved {
 		status = "approved"
 	}
-	_, err := d.pool.Exec(ctx,
-		`UPDATE intercept_pending SET status=$2, decided_at=now() WHERE id=$1`, id, status)
-	return err
+	// 只允许裁决 pending：已 approved/denied/expired 的记录不可被重复裁决
+	//（过期后 worker 已放弃，"补批"会造成 UI 显示成功但没有任何效果）。
+	tag, err := d.pool.Exec(ctx,
+		`UPDATE intercept_pending SET status=$2, decided_at=now() WHERE id=$1 AND status='pending'`, id, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPendingNotFound
+	}
+	return nil
 }
 
 func (d *DB) ListAssetRules(ctx context.Context) ([]AssetRule, error) {

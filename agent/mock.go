@@ -6,31 +6,19 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 )
 
 // MockProvider 内置假 LLM：无 key 也能跑通 planner/worker 全闭环。
 // 它是"确定性智能体"，按 STATE 块驱动脚本，行为贴近真实渗透流程。
 type MockProvider struct {
-	session map[string]*mockSession // key: explorationID or workerID/nodeID
 	// allowWriteProbe 允许 mock 对目标发写操作(POST)探测。
 	// 默认关闭：写操作是对真实站点的副作用（如登录尝试），需显式开启。
 	allowWriteProbe bool
 }
 
-type mockSession struct {
-	calls int
-	plan  []mockStep
-	idx   int
-}
-
-type mockStep struct {
-	name    string
-	args    map[string]any
-	content string
-}
-
 func NewMockProvider() *MockProvider {
-	return &MockProvider{session: map[string]*mockSession{}}
+	return &MockProvider{}
 }
 
 // SetAllowWriteProbe 开启 mock 的写操作探测（POST）。
@@ -45,12 +33,12 @@ func (p *MockProvider) Ping(ctx context.Context) (string, error) {
 }
 
 var (
-	reState     = regexp.MustCompile(`STATE\s*[:=]\s*(\{.*\})`)
-	reTarget    = regexp.MustCompile(`(?i)(?:target|scope|host|domain)[:=]\s*\"?([a-z0-9\-\.]+\.[a-z]{2,})\"?`)
-	reIntent    = regexp.MustCompile(`(?i)intent[^\n]{0,80}[:：]\s*(.{1,120})`)
-	reURL       = regexp.MustCompile(`https?://[^\s"'` + "`" + `]+`)
+	reState      = regexp.MustCompile(`STATE\s*[:=]\s*(\{.*\})`)
+	reTarget     = regexp.MustCompile(`(?i)(?:target|scope|host|domain)[:=]\s*\"?([a-z0-9\-\.]+\.[a-z]{2,})\"?`)
+	reIntent     = regexp.MustCompile(`(?i)intent[^\n]{0,80}[:：]\s*(.{1,120})`)
+	reURL        = regexp.MustCompile(`https?://[^\s"'` + "`" + `]+`)
 	reToolResult = regexp.MustCompile(`^result\((\w+)\): (.+)$`)
-	reAnyHost   = regexp.MustCompile(`(?i)([a-z0-9][a-z0-9\-\.]*\.[a-z]{2,})\b`)
+	reAnyHost    = regexp.MustCompile(`(?i)([a-z0-9][a-z0-9\-\.]*\.[a-z]{2,})\b`)
 )
 
 // firstHostInMessages 从消息里抓第一个像域名的东西
@@ -78,14 +66,14 @@ func firstHostInMessages(messages []Message) string {
 }
 
 type mockState struct {
-	Goal         string `json:"goal"`
-	Target       string `json:"target"`
-	OpenIntents  int    `json:"open_intents"`
-	DoneIntents  int    `json:"done_intents"`
-	Facts        int    `json:"facts"`
-	Findings     int    `json:"findings"`
-	GoalsMet     bool   `json:"goals_met"`
-	FirstCall    bool   `json:"first_call"`
+	Goal        string `json:"goal"`
+	Target      string `json:"target"`
+	OpenIntents int    `json:"open_intents"`
+	DoneIntents int    `json:"done_intents"`
+	Facts       int    `json:"facts"`
+	Findings    int    `json:"findings"`
+	GoalsMet    bool   `json:"goals_met"`
+	FirstCall   bool   `json:"first_call"`
 }
 
 func parseState(messages []Message) mockState {
@@ -205,11 +193,11 @@ func estimateTokens(s string) int {
 // 让 mock 每次任务有变化：按目标域名哈希稳定挑选剧本（同目标可复现，不同目标多样）。
 
 type mockScript struct {
-	Name        string
-	VulnTitle   string
+	Name         string
+	VulnTitle    string
 	VulnSeverity string
 	VulnEvidence map[string]any
-	Intents     []map[string]any // add_intent 序列
+	Intents      []map[string]any // add_intent 序列
 }
 
 var mockScripts = []mockScript{
@@ -427,11 +415,11 @@ func tc(name string, args map[string]any) ToolCall {
 	return t
 }
 
-var mockSeq int
+// mockSeq 用原子递增：多 worker 并发调用 Chat 时避免 data race。
+var mockSeq int64
 
-func hashName() int {
-	mockSeq++
-	return mockSeq
+func hashName() int64 {
+	return atomic.AddInt64(&mockSeq, 1)
 }
 
 func numToolCallsSoFar(messages []Message, name string) int {

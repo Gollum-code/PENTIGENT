@@ -20,6 +20,10 @@ export default function Nav() {
   const [results, setResults] = useState<any>({ tasks: [], assets: [], findings: [] });
   const [showResults, setShowResults] = useState(false);
 
+  // 静态导出开启了 trailingSlash，usePathname() 会返回 "/findings/"，
+  // 直接与 "/findings" 比较永远不相等（高亮失效）。统一去掉尾部斜杠再比较。
+  const normalizedPath = pathname && pathname !== "/" ? pathname.replace(/\/+$/, "") : "/";
+
   // 全局搜索：跨 任务/资产/漏洞
   useEffect(() => {
     if (!q.trim()) {
@@ -48,7 +52,7 @@ export default function Nav() {
     <nav className="nav">
       <strong style={{ marginRight: 12 }}>PENTIGENT</strong>
       {links.map((l) => (
-        <Link key={l.href} href={l.href} className={pathname === l.href ? "active" : ""}>
+        <Link key={l.href} href={l.href} className={normalizedPath === l.href ? "active" : ""}>
           {l.label}
         </Link>
       ))}

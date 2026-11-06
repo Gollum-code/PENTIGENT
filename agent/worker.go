@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"time"
 )
 
@@ -24,7 +25,8 @@ RUNTIME ENVIRONMENT: Windows (PowerShell). Use Windows-available commands only:
 
 Tool usage:
 - bash / webfetch   : perform the actual reconnaissance or verification
-- insert_assets     : submit discovered assets (dedup/parenting is computed by the system)
+- insert_assets     : submit discovered assets (dedup/parenting is computed by the system;
+                      assets whose host is outside the authorized scope are rejected — submit only what you actually saw)
 - record_fact       : record a concrete technical conclusion you obtained
 - report_finding    : report a CONFIRMED VULNERABILITY (with severity + evidence)
 - search_all_worker_traces / get_worker_trace : consult other workers' progress if stuck
@@ -52,15 +54,15 @@ type Worker struct {
 
 // WorkerResult 一次意图执行的产出
 type WorkerResult struct {
-	IntentID    int64
-	NewFacts    int
-	NewFindings int
-	NewAssets   int
-	Steps       int
-	InputTokens int
+	IntentID     int64
+	NewFacts     int
+	NewFindings  int
+	NewAssets    int
+	Steps        int
+	InputTokens  int
 	OutputTokens int
-	Status      string // done | blocked | error
-	Error       string
+	Status       string // done | blocked | error
+	Error        string
 }
 
 // Run 领一条意图并执行，直到 LLM 不再调用工具或到 maxRounds
@@ -92,6 +94,11 @@ func (w *Worker) Run(ctx context.Context, taskID, explorationID int64, intent *N
 	}
 
 	for round := 0; round < maxRounds; round++ {
+		// 心跳续约：本轮可能包含耗时 LLM 调用 + 工具执行 + 审批等待，
+		// 刷新 claimed_at 防止被 ReclaimStuckIntents 误回收重领
+		if w.Store != nil {
+			_ = w.Store.TouchIntent(ctx, intent.ID)
+		}
 		resp, err := CurrentProvider().Chat(ctx, ChatRequest{
 			Messages:    messages,
 			Tools:       tools,
@@ -234,6 +241,8 @@ func (w *Worker) waitApproval(ctx context.Context, pendingID int64) string {
 			return "denied"
 		}
 	}
+	// 超时不再等：标记为 expired，避免审批队列永远堆着"待审"僵尸
+	_ = w.Store.ExpirePending(context.Background(), pendingID)
 	return "timeout"
 }
 
@@ -241,7 +250,21 @@ func (w *Worker) waitApproval(ctx context.Context, pendingID int64) string {
 func (w *Worker) executeAllowed(ctx context.Context, taskID, explorationID, nodeID int64, call ToolCall, args map[string]any, res *WorkerResult) string {
 	switch call.Function.Name {
 	case "bash", "webfetch":
-		out, err := ExecNative(ctx, call.Function.Name, args)
+		// webfetch 重定向时重新校验目标，防止 302 绕出授权范围
+		redirectCheck := func(u string) error {
+			if w.Guard == nil {
+				return nil
+			}
+			d, err := w.Guard.Check("webfetch", map[string]any{"url": u})
+			if err != nil {
+				return err
+			}
+			if d.Action != "allow" {
+				return fmt.Errorf("%s", d.Reason)
+			}
+			return nil
+		}
+		out, err := ExecNative(ctx, call.Function.Name, args, redirectCheck)
 		status := "ok"
 		if err != nil {
 			status = "error"
@@ -299,18 +322,28 @@ func (w *Worker) handleInsertAssets(ctx context.Context, taskID, explorationID, 
 		am, _ := ra.(map[string]any)
 		a := Asset{
 			Type:       str(am, "type"),
+			RootDomain: str(am, "root_domain"),
 			Domain:     str(am, "domain"),
 			RecordType: str(am, "record_type"),
 			IP:         str(am, "ip"),
+			AppName:    str(am, "app_name"),
+			BundleID:   str(am, "bundle_id"),
 			URL:        str(am, "url"),
 			Method:     str(am, "method"),
 			Title:      str(am, "title"),
-			AppName:    str(am, "app_name"),
 		}
 		// 资产归属公司：从任务查出的真实 company_id（MVP：未绑定则跳过入库）
 		companyID := w.CompanyID
 		if companyID <= 0 {
 			lines = append(lines, fmt.Sprintf("asset(%s) 跳过：任务未绑定公司", a.Type))
+			statusAll = "error"
+			continue
+		}
+		// 范围校验：资产图是全局真值库，写入范围外目标等于让 LLM 越权建档
+		//（后续所有任务都会看到这些资产）。只对有主机的资产类型校验，
+		// app（app_name/bundle_id）没有主机，放行。
+		if host := assetHost(a); host != "" && w.Guard != nil && !w.Guard.ScopeAllows(host) {
+			lines = append(lines, fmt.Sprintf("asset(%s) 跳过：%s 不在授权范围", a.Type, host))
 			statusAll = "error"
 			continue
 		}
@@ -333,6 +366,23 @@ func (w *Worker) handleInsertAssets(ctx context.Context, taskID, explorationID, 
 	return fmt.Sprintf("result(insert_assets): %s", string(bs))
 }
 
+// assetHost 提取资产的"主机标识"用于授权范围校验：
+// service/endpoint 优先解析 URL 的 hostname，其余类型用 domain / ip / root_domain。
+// app（app_name/bundle_id）没有主机，返回空串。
+func assetHost(a Asset) string {
+	if a.URL != "" {
+		if u, err := url.Parse(a.URL); err == nil && u.Hostname() != "" {
+			return u.Hostname()
+		}
+	}
+	for _, h := range []string{a.Domain, a.IP, a.RootDomain} {
+		if h != "" {
+			return h
+		}
+	}
+	return ""
+}
+
 func (w *Worker) handleRecordFact(ctx context.Context, taskID, explorationID, nodeID int64, args map[string]any, res *WorkerResult) string {
 	summary, _ := args["summary"].(string)
 	if summary == "" {
@@ -350,6 +400,10 @@ func (w *Worker) handleRecordFact(ctx context.Context, taskID, explorationID, no
 	res.NewFacts++
 	// 边：intent -> yields -> fact
 	_ = w.Store.AddEdge(ctx, explorationID, nodeID, factID, "yields")
+	// 可选：把事实锚定到具体资产，支撑按资产反查测试覆盖
+	if f, ok := args["asset_id"].(float64); ok && f > 0 {
+		_ = w.Store.Anchor(ctx, explorationID, factID, int64(f))
+	}
 	bs, _ := json.Marshal(map[string]any{"fact_id": factID, "status": status})
 	w.logTool(ctx, taskID, explorationID, nodeID, "record_fact", args, "ok", string(bs))
 	return fmt.Sprintf("result(record_fact): 事实已记录 id=%d", factID)
@@ -371,9 +425,13 @@ func (w *Worker) handleReportFinding(ctx context.Context, taskID, explorationID,
 		return fmt.Sprintf("result(report_finding): %v", err)
 	}
 	// 同时写 findings 表
-	_, _, _ = w.Store.ReportFinding(ctx, Finding{
+	finding := Finding{
 		TaskID: &taskID, ExplorationID: &explorationID, NodeID: &fid, Title: title, Severity: severity, Status: "confirmed", Evidence: evidence,
-	})
+	}
+	if id, inserted, err := w.Store.ReportFinding(ctx, finding); err == nil && inserted {
+		finding.ID = id
+		emitFinding(finding) // Webhook/IM 推送（仅新漏洞，去重后的重复上报不触发）
+	}
 	res.NewFindings++
 	_ = w.Store.AddEdge(ctx, explorationID, nodeID, fid, "yields")
 	bs, _ := json.Marshal(map[string]any{"finding_id": fid, "severity": severity})

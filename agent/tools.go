@@ -39,24 +39,26 @@ func ToolSet() []Tool {
 
 	tools = append(tools, ToolSchema("insert_assets", "worker：提交发现的资产（父子/去重由程序计算）",
 		map[string]any{"assets": map[string]any{
-			"type":  "array",
+			"type": "array",
 			"items": map[string]any{"type": "object", "properties": map[string]any{
 				"type":        Prop("string", "root_domain|subdomain|ip|service|endpoint|app"),
+				"root_domain": Prop("string", "根域名（留空由程序按父子关系计算）"),
 				"domain":      Prop("string", "域名"),
 				"record_type": Prop("string", "DNS 记录类型 A/CNAME/MX..."),
 				"ip":          Prop("string", "IP"),
+				"app_name":    Prop("string", "应用名"),
+				"bundle_id":   Prop("string", "App Bundle ID"),
 				"url":         Prop("string", "URL"),
 				"method":      Prop("string", "HTTP 方法"),
 				"title":       Prop("string", "标题/指纹"),
-				"app_name":    Prop("string", "应用名"),
 			}, "required": []string{"type"}},
 		}}, []string{"assets"}))
 
 	tools = append(tools, ToolSchema("record_fact", "worker：写事实节点（探测结论）",
 		map[string]any{
-			"summary":     Prop("string", "事实摘要"),
-			"asset_id":    map[string]any{"type": "number"},
-			"certainty":   Prop("string", "confirmed|dismissed"),
+			"summary":   Prop("string", "事实摘要"),
+			"asset_id":  map[string]any{"type": "number"},
+			"certainty": Prop("string", "confirmed|dismissed"),
 		}, []string{"summary"}))
 
 	tools = append(tools, ToolSchema("report_finding", "worker：报告漏洞",
@@ -70,7 +72,13 @@ func ToolSet() []Tool {
 		map[string]any{"command": Prop("string", "要执行的命令")}, []string{"command"}))
 
 	tools = append(tools, ToolSchema("webfetch", "worker：发起 HTTP 请求并留痕",
-		map[string]any{"url": Prop("string", "请求 URL")}, []string{"url"}))
+		map[string]any{
+			"url": Prop("string", "请求 URL"),
+			"method": map[string]any{
+				"type": "string", "description": "HTTP 方法，默认 GET；写操作会触发审批",
+				"enum": []any{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+			},
+		}, []string{"url"}))
 
 	tools = append(tools, ToolSchema("search_all_worker_traces", "worker：搜索其他 worker 的执行过程",
 		map[string]any{"query": Prop("string", "搜索关键字")}, []string{"query"}))

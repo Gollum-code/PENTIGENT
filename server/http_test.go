@@ -72,8 +72,11 @@ func TestLoginAndAccess(t *testing.T) {
 	// 恢复成文档默认密码，避免污染后续共享 DB 的测试（e2e 用 admin123）
 	defer func() {
 		_, _ = d.Pool().Exec(srv.ctx(), `DELETE FROM settings WHERE key='admin'`)
-		_, _ = d.Pool().Exec(srv.ctx(), `INSERT INTO settings (key, value) VALUES ('admin', '{"password":"`+
-			srv.hashPassword("admin123")+`"}'::jsonb)`)
+		if hash, err := passwordHash("admin123"); err == nil {
+			payload, _ := json.Marshal(map[string]string{"password": hash})
+			_, _ = d.Pool().Exec(srv.ctx(),
+				`INSERT INTO settings (key, value) VALUES ('admin', $1::jsonb)`, string(payload))
+		}
 	}()
 	h := srv.Handler()
 
@@ -260,12 +263,12 @@ func TestParseIntParam(t *testing.T) {
 		max  int
 		want int
 	}{
-		{"", 50, 200, 50},       // 空→默认
-		{"25", 50, 200, 25},     // 正常
-		{"9999", 50, 200, 200},  // 超上限→钳制
-		{"abc", 50, 200, 50},    // 非法→默认
-		{"-5", 50, 200, 50},     // 负数→默认
-		{"0", 50, 200, 0},       // 0 合法
+		{"", 50, 200, 50},      // 空→默认
+		{"25", 50, 200, 25},    // 正常
+		{"9999", 50, 200, 200}, // 超上限→钳制
+		{"abc", 50, 200, 50},   // 非法→默认
+		{"-5", 50, 200, 50},    // 负数→默认
+		{"0", 50, 200, 0},      // 0 合法
 	}
 	for _, c := range cases {
 		if got := parseIntParam(c.in, c.def, c.max); got != c.want {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 // ---- 任务 handlers ----
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request, _ map[string]string) {
-	stats, err := s.db.GetStats(s.ctx())
+	stats, err := s.db.GetStats(r.Context())
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -25,7 +26,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, _ map[s
 	q := r.URL.Query()
 	limit := parseIntParam(q.Get("limit"), 50, 200)
 	offset := parseIntParam(q.Get("offset"), 0, 100000)
-	tasks, total, err := s.db.ListTasks(s.ctx(), q.Get("status"), q.Get("q"), limit, offset)
+	tasks, total, err := s.db.ListTasks(r.Context(), q.Get("status"), q.Get("q"), limit, offset)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -56,13 +57,13 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request, _ map[
 	}
 
 	// 确保默认公司（资产全局真值库归属）
-	companyID, err := s.db.EnsureCompany(s.ctx(), "default")
+	companyID, err := s.db.EnsureCompany(r.Context(), "default")
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	cid := companyID
-	taskID, err := s.db.CreateTask(s.ctx(), req.Name, req.Goal, req.Description, &cid)
+	taskID, err := s.db.CreateTask(r.Context(), req.Name, req.Goal, req.Description, &cid)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -78,7 +79,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request, _ map[
 		} else if isIP(host) {
 			kind = "ip"
 		}
-		_ = s.db.AddScope(s.ctx(), taskID, host, kind)
+		_ = s.db.AddScope(r.Context(), taskID, host, kind)
 	}
 
 	// 校验：目标里提到的域名若不在授权范围内，给出警告（否则任务会全程被硬边界拦截）
@@ -124,7 +125,7 @@ func (s *Server) handleSetTaskNotes(w http.ResponseWriter, r *http.Request, para
 		writeErr(w, 400, "无效请求体")
 		return
 	}
-	if err := s.db.SetTaskNotes(s.ctx(), id, req.Notes); err != nil {
+	if err := s.db.SetTaskNotes(r.Context(), id, req.Notes); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -137,13 +138,13 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, params ma
 		writeErr(w, 400, err.Error())
 		return
 	}
-	task, err := s.db.GetTask(s.ctx(), id)
+	task, err := s.db.GetTask(r.Context(), id)
 	if err != nil {
 		writeErr(w, 404, "任务不存在")
 		return
 	}
-	scope, _ := s.db.ListScope(s.ctx(), id)
-	findings, _, _ := s.db.ListFindings(s.ctx(), &id, "", "", 100, 0)
+	scope, _ := s.db.ListScope(r.Context(), id)
+	findings, _, _ := s.db.ListFindings(r.Context(), &id, "", "", 100, 0)
 	writeJSON(w, 200, map[string]any{
 		"task":     task,
 		"scope":    scope,
@@ -159,7 +160,7 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request, params
 		return
 	}
 	s.engine.Stop(id)
-	if err := s.db.DeleteTask(s.ctx(), id); err != nil {
+	if err := s.db.DeleteTask(r.Context(), id); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -172,7 +173,7 @@ func (s *Server) handleStartTask(w http.ResponseWriter, r *http.Request, params 
 		writeErr(w, 400, err.Error())
 		return
 	}
-	task, err := s.db.GetTask(s.ctx(), id)
+	task, err := s.db.GetTask(r.Context(), id)
 	if err != nil {
 		writeErr(w, 404, "任务不存在")
 		return
@@ -197,8 +198,8 @@ func (s *Server) handlePauseTask(w http.ResponseWriter, r *http.Request, params 
 	}
 	s.engine.Stop(id)
 	// 保留探索状态为 paused，供下次 start 断点续跑
-	_ = s.db.SetExplorationStatusForTask(s.ctx(), id, "paused")
-	_ = s.db.SetTaskStatus(s.ctx(), id, "paused", "")
+	_ = s.db.SetExplorationStatusForTask(r.Context(), id, "paused")
+	_ = s.db.SetTaskStatus(r.Context(), id, "paused", "")
 	writeJSON(w, 200, map[string]any{"id": id, "status": "paused"})
 }
 
@@ -209,7 +210,7 @@ func (s *Server) handleStopTask(w http.ResponseWriter, r *http.Request, params m
 		return
 	}
 	s.engine.Stop(id)
-	_ = s.db.SetTaskStatus(s.ctx(), id, "stopped", "")
+	_ = s.db.SetTaskStatus(r.Context(), id, "stopped", "")
 	writeJSON(w, 200, map[string]any{"id": id, "status": "stopped"})
 }
 
@@ -231,38 +232,53 @@ func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request, params
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(200)
 
-	var lastID int64
-	// 首次立即推送最近活动
-	if rows, err := s.db.ListActivityAfter(s.ctx(), id, 0, 50); err == nil && len(rows) > 0 {
-		for _, a := range rows {
-			b, _ := json.Marshal(a)
-			fmt.Fprintf(w, "data: %s\n\n", string(b))
-			lastID = a.ID
-		}
-		flusher.Flush()
+	// 先订阅，再补推历史/断线期间的事件，避免订阅瞬间遗漏。
+	// 每个任务只有一个 DB 轮询 goroutine（sseHub），客户端数增加不放大查询。
+	ch, unsubscribe := s.sse.subscribe(id)
+	defer unsubscribe()
+
+	writeEvent := func(a db.Activity) bool {
+		b, _ := json.Marshal(a)
+		_, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", a.ID, string(b))
+		return err == nil
 	}
 
-	ticker := time.NewTicker(700 * time.Millisecond)
-	defer ticker.Stop()
+	// 断线重连：浏览器会带 Last-Event-ID；也支持 ?lastEventId= 便于调试。
+	var lastID int64
+	if v := r.Header.Get("Last-Event-ID"); v != "" {
+		lastID, _ = strconv.ParseInt(v, 10, 64)
+	} else if v := r.URL.Query().Get("lastEventId"); v != "" {
+		lastID, _ = strconv.ParseInt(v, 10, 64)
+	}
+	var initial []db.Activity
+	if lastID > 0 {
+		initial, _ = s.db.ListActivityAfter(r.Context(), id, lastID, 200)
+	} else {
+		initial, _ = s.db.ListRecentActivity(r.Context(), id, 50)
+	}
+	for _, a := range initial {
+		if !writeEvent(a) {
+			return
+		}
+	}
+	flusher.Flush()
+
+	// 心跳只写注释行，不查库
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-ticker.C:
-			rows, err := s.db.ListActivityAfter(s.ctx(), id, lastID, 100)
-			if err != nil {
-				continue
+		case a := <-ch:
+			if !writeEvent(a) {
+				return
 			}
-			for _, a := range rows {
-				b, _ := json.Marshal(a)
-				fmt.Fprintf(w, "data: %s\n\n", string(b))
-				lastID = a.ID
+			flusher.Flush()
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
 			}
-			if len(rows) > 0 {
-				flusher.Flush()
-			}
-			// 心跳注释行，保持连接
-			fmt.Fprintf(w, ": ping\n\n")
 			flusher.Flush()
 		}
 	}
@@ -277,13 +293,13 @@ func (s *Server) handleTaskGraph(w http.ResponseWriter, r *http.Request, params 
 		return
 	}
 	// 找该任务的 exploration
-	explorationID, err := s.db.ExplorationForTask(s.ctx(), id)
+	explorationID, err := s.db.ExplorationForTask(r.Context(), id)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"nodes": []any{}, "edges": []any{}})
 		return
 	}
-	nodes, _ := s.db.ListNodes(s.ctx(), explorationID, "", "")
-	edges, _ := s.db.ListEdges(s.ctx(), explorationID)
+	nodes, _ := s.db.ListNodes(r.Context(), explorationID, "", "")
+	edges, _ := s.db.ListEdges(r.Context(), explorationID)
 	if nodes == nil {
 		nodes = []db.Node{}
 	}
@@ -307,7 +323,7 @@ func (s *Server) handleCloneTask(w http.ResponseWriter, r *http.Request, params 
 		Goal string `json:"goal"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req) // body 可为空
-	newID, err := s.db.CloneTask(s.ctx(), id, req.Name, req.Goal)
+	newID, err := s.db.CloneTask(r.Context(), id, req.Name, req.Goal)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -324,7 +340,7 @@ func (s *Server) handleResetData(w http.ResponseWriter, r *http.Request, _ map[s
 		writeErr(w, 400, "需要 confirm=RESET 以确认清空全部数据")
 		return
 	}
-	if err := s.db.ResetAllData(s.ctx()); err != nil {
+	if err := s.db.ResetAllData(r.Context()); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}

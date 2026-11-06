@@ -55,6 +55,8 @@ export default function Intercept() {
   };
 
   const deleteRule = async (id: number) => {
+    // 防误删：规则被删后对应行为不再受约束（可能重新放行危险命令）
+    if (!window.confirm("确认删除该拦截规则？删除后相关命令将不再被拒绝/要求审批。")) return;
     const d = await apiSafe(`/api/intercept/rules/${id}`, { method: "DELETE" }, "规则已删除");
     if (d) load();
   };

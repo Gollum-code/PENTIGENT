@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -14,40 +15,55 @@ import (
 
 // Engine 事件驱动闭环：图变更 → debounce → planner → frontier → N workers → 写回 → 再唤醒
 type Engine struct {
-	db     *db.DB
-	store  *db.DB
-	workers int
-	debounce int // planner 唤醒 debounce（ms）
-	idleTimeout time.Duration // 无变更信号时的兜底收敛检查
-	intentBudget int // 单任务最大意图数（0=不限），防真实 LLM 无限扩展烧钱
-	tokenBudget  int // 单任务最大 token 消耗（0=不限）
+	db           *db.DB
+	store        *db.DB
+	workers      int
+	debounce     int           // planner 唤醒 debounce（ms）
+	idleTimeout  time.Duration // 无变更信号时的兜底收敛检查
+	intentBudget int           // 单任务最大意图数（0=不限），防真实 LLM 无限扩展烧钱
+	tokenBudget  int           // 单任务最大 token 消耗（0=不限）
+	maxRounds    int           // 单条意图内 worker 最多 LLM 轮次
+	maxRuntime   time.Duration // 单任务最长运行时长（0=不限），防卡死无限运行
 	// 注意：guard 不做成共享字段 —— 每个任务必须用独立实例，
 	// 否则并发任务会互相覆盖授权范围（安全越权）。见 run()。
 
 	mu      sync.Mutex
-	running map[int64]context.CancelFunc
+	running map[int64]*runHandle
 
 	workerMu sync.Mutex
 	wcount   map[int64]int
 }
 
+// runHandle 一次任务运行的句柄：cancel 用于停止，done 在 goroutine 真正退出后关闭。
+// Stop 必须等 done，否则紧接着的 Start 会误报"任务已在运行"，且收尾写状态
+// 可能覆盖操作员刚写入的 paused。
+type runHandle struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 // intentTimeout worker 单条意图执行超时；超时未完成的 running intent 会被回收为 open
 const intentTimeout = 5 * time.Minute
+
+// stopWaitTimeout Stop 等待运行 goroutine 退出的上限
+const stopWaitTimeout = 5 * time.Second
 
 func NewEngine(database *db.DB, workers int) *Engine {
 	if workers <= 0 {
 		workers = 4
 	}
 	return &Engine{
-		db:          database,
-		store:       database,
-		workers:     workers,
-		debounce:    500,
-		idleTimeout: 30 * time.Second,
-		intentBudget: 15,   // 默认 15 条意图（真实 LLM 会持续扩展，需硬上限）
+		db:           database,
+		store:        database,
+		workers:      workers,
+		debounce:     500,
+		idleTimeout:  30 * time.Second,
+		intentBudget: 15,     // 默认 15 条意图（真实 LLM 会持续扩展，需硬上限）
 		tokenBudget:  150000, // 默认 15 万 token
-		running:     map[int64]context.CancelFunc{},
-		wcount:      map[int64]int{},
+		maxRounds:    12,
+		maxRuntime:   30 * time.Minute, // 默认 30 分钟，防卡死无限运行（0=不限）
+		running:      map[int64]*runHandle{},
+		wcount:       map[int64]int{},
 	}
 }
 
@@ -59,15 +75,23 @@ func (e *Engine) Start(taskID int64) error {
 		return fmt.Errorf("任务已在运行")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	e.running[taskID] = cancel
+	if e.maxRuntime > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), e.maxRuntime)
+	}
+	h := &runHandle{cancel: cancel, done: make(chan struct{})}
+	e.running[taskID] = h
 	e.mu.Unlock()
 
 	go func() {
 		defer func() {
 			e.mu.Lock()
-			delete(e.running, taskID)
+			// 只清理本次 handle，防止与"Stop 后立刻 Start"交错时误删新运行
+			if cur, ok := e.running[taskID]; ok && cur == h {
+				delete(e.running, taskID)
+			}
 			e.mu.Unlock()
 			cancel()
+			close(h.done)
 		}()
 		e.run(ctx, taskID)
 	}()
@@ -75,13 +99,19 @@ func (e *Engine) Start(taskID int64) error {
 	return nil
 }
 
-// Stop 停止任务
+// Stop 停止任务。等待运行 goroutine 真正退出（有界），
+// 保证 Stop 返回后不会再有该任务的后台写入。
 func (e *Engine) Stop(taskID int64) {
 	e.mu.Lock()
-	cancel, ok := e.running[taskID]
+	h, ok := e.running[taskID]
 	e.mu.Unlock()
-	if ok {
-		cancel()
+	if !ok {
+		return
+	}
+	h.cancel()
+	select {
+	case <-h.done:
+	case <-time.After(stopWaitTimeout):
 	}
 }
 
@@ -113,10 +143,22 @@ func (e *Engine) RunningCount() int {
 // StopAll 停止所有运行中的任务
 func (e *Engine) StopAll() {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	for id, cancel := range e.running {
-		cancel()
-		delete(e.running, id)
+	handles := make([]*runHandle, 0, len(e.running))
+	for _, h := range e.running {
+		handles = append(handles, h)
+	}
+	e.mu.Unlock()
+	for _, h := range handles {
+		h.cancel()
+	}
+	// 有界等待退出，避免关闭流程被卡死；map 由各 goroutine 的 defer 自行清理
+	deadline := time.After(stopWaitTimeout * 2)
+	for _, h := range handles {
+		select {
+		case <-h.done:
+		case <-deadline:
+			return
+		}
 	}
 }
 
@@ -128,7 +170,8 @@ func (e *Engine) IsRunning(taskID int64) bool {
 }
 
 // findResumable 找可断点续跑的探索：任务最近一个 paused/stopped 的探索，且仍有未完成 intent。
-// 同时兜底：status=running 但引擎不再运行（进程崩溃留下的僵尸）也视为可恢复。
+// 同时兜底：status=running 的探索也视为可恢复 —— 能走到 run() 说明本任务没有其它
+// 运行实例（Start 已做互斥），所以这里的 running 必然是上次进程崩溃留下的僵尸。
 // 返回 (explorationID, 是否恢复, err)
 func (e *Engine) findResumable(ctx context.Context, taskID int64) (int64, bool, error) {
 	explorationID, err := e.store.ExplorationForTask(ctx, taskID)
@@ -141,30 +184,47 @@ func (e *Engine) findResumable(ctx context.Context, taskID int64) (int64, bool, 
 	}
 	switch expl.Status {
 	case "paused", "stopped":
-		// 正常暂停 → 只恢复还有未完成 intent 的
+		// 正常暂停/停止 → 只恢复还有未完成 intent 的
 		hasOpen, err := e.store.HasOpenIntent(ctx, explorationID)
 		if err == nil && hasOpen {
 			return explorationID, true, nil
 		}
 	case "running":
-		// 僵尸 running：引擎未在跑该任务说明上次进程被杀，重置未完成 intent 后恢复
-		if !e.IsRunning(taskID) {
-			return explorationID, true, nil
-		}
+		// 僵尸 running：上次进程被杀。run() 恢复时会 ResetRunningIntents 重新入队。
+		return explorationID, true, nil
 	}
 	return 0, false, nil
 }
 
 // runGoals 首次运行时做目标分解 + 约束登记 + 建 goal 节点
 func (e *Engine) runGoals(ctx context.Context, taskID int64, task *db.Task, explorationID int64) {
-	gr := agentGoalsRun(ctx, task)
-	// 记录授权范围落库失败（否则任务无 scope → guard 拦一切 → 空跑）
-	for _, s := range gr.Scope {
+	// 先取操作员已登记的授权范围：既作为 LLM 提案的输入（让它复述，别发明），
+	// 也作为白名单锚点。
+	existing, err := e.db.ListScope(ctx, taskID)
+	if err != nil {
+		log.Printf("engine: task %d 读取已有授权范围失败（按空范围处理）: %v", taskID, err)
+		existing = nil
+	}
+	gr := agentGoalsRun(ctx, task, existing)
+	// 安全不变量：授权范围只能由操作员提供。LLM 提出的范围必须先过白名单，
+	// 落在"操作员范围 ∪ 任务描述推断的主机"之外的一律丢弃并审计日志。
+	// 否则提示注入可让它把任意域名写进 task_scope，绕过 guard 资产硬边界。
+	anchors := trustedScopeAnchors(existing, extractDomains(task.Goal+" "+task.Description))
+	acceptedScopes, droppedScopes := filterLLMScopes(gr.Scope, anchors)
+	for _, d := range droppedScopes {
+		log.Printf("engine: task %d 拒绝 goals LLM 提出的越权范围 %q（授权范围只能由操作员提供）", taskID, d)
+	}
+	for _, s := range acceptedScopes {
 		if err := e.db.AddScope(ctx, taskID, s.Pattern, s.Kind); err != nil {
 			log.Printf("engine: task %d AddScope(%s) 失败: %v", taskID, s.Pattern, err)
 		}
 	}
 	for _, c := range gr.Constraints {
+		// 只接受 deny 约束：deny 只会收紧；allow 会跳过 ask 审批，等于让 LLM 削弱审批门。
+		if c.Kind != "deny" {
+			log.Printf("engine: task %d 忽略 goals LLM 提出的 %s 约束 %q（allow 约束只能由操作员登记）", taskID, c.Kind, c.Pattern)
+			continue
+		}
 		if err := e.db.AddConstraint(ctx, taskID, c.Kind, c.Pattern); err != nil {
 			log.Printf("engine: task %d AddConstraint(%s) 失败: %v", taskID, c.Pattern, err)
 		}
@@ -178,7 +238,7 @@ func (e *Engine) runGoals(ctx context.Context, taskID int64, task *db.Task, expl
 		}
 	}
 	tid := int64(taskID)
-	_ = e.recordEngineActivity(tid, explorationID, "goals", "目标分解", gr.InputTokens, gr.OutputTokens, gr.Error)
+	_ = e.recordEngineActivity(ctx, tid, explorationID, "goals", "目标分解", gr.InputTokens, gr.OutputTokens, gr.Error)
 }
 
 // run 一次任务的完整生命周期
@@ -217,7 +277,7 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 			log.Printf("engine: 断点续跑，重置 %d 条 running intent", n)
 		}
 		taskIDCopy := int64(taskID)
-		_ = e.recordEngineActivity(taskIDCopy, explorationID, "resume", "断点续跑", 0, 0, "")
+		_ = e.recordEngineActivity(ctx, taskIDCopy, explorationID, "resume", "断点续跑", 0, 0, "")
 	} else {
 		explorationID, err = e.store.CreateExploration(ctx, taskID, task.Goal)
 		if err != nil {
@@ -267,10 +327,8 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 	// 唤醒 planner（无状态：只读图+todolist）
 	planRes := e.planOnce(ctx, taskID, explorationID)
 	plannerErrCount := 0
-	if planRes.GoalProved {
-		_ = e.db.SetExplorationStatus(ctx, explorationID, "done")
-		_ = e.db.SetTaskStatus(ctx, taskID, "done", "")
-		log.Printf("engine: task %d 目标达成", taskID)
+	// 只有"全部 goal 都 met"才真正收尾；planner 的 prove_goal 只是声明，不能直接当 done
+	if planRes.GoalProved && e.markDoneIfAllGoalsMet(ctx, taskID, explorationID) {
 		return
 	}
 
@@ -280,9 +338,7 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = e.db.SetExplorationStatus(ctx, explorationID, "stopped")
-			_ = e.db.SetTaskStatus(ctx, taskID, "stopped", "")
-			log.Printf("engine: task %d stopped", taskID)
+			e.finalizeOnStop(ctx, taskID, explorationID)
 			return
 
 		case <-wake:
@@ -306,10 +362,7 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 			e.dispatchAsync(ctx, taskID, explorationID, guard, signal)
 			// 唤醒 planner
 			planRes = e.planOnce(ctx, taskID, explorationID)
-			if planRes.GoalProved {
-				_ = e.db.SetExplorationStatus(ctx, explorationID, "done")
-				_ = e.db.SetTaskStatus(ctx, taskID, "done", "")
-				log.Printf("engine: task %d 目标达成", taskID)
+			if planRes.GoalProved && e.markDoneIfAllGoalsMet(ctx, taskID, explorationID) {
 				return
 			}
 
@@ -329,6 +382,7 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 				log.Printf("engine: task %d planner LLM 失败(第%d次), %v 后重试: %s", taskID, plannerErrCount, backoff, planRes.Error)
 				select {
 				case <-ctx.Done():
+					e.finalizeOnStop(ctx, taskID, explorationID)
 					return
 				case <-time.After(backoff):
 				}
@@ -379,11 +433,35 @@ func (e *Engine) run(ctx context.Context, taskID int64) {
 	}
 }
 
+// finalizeOnStop 在 ctx 结束时写终态：
+//   - ctx 已取消，直接用它写库会失败 → 用独立超时上下文；
+//   - 操作员已设 paused：保留，供断点续跑；
+//   - 达到 maxRuntime（DeadlineExceeded）：标 incomplete 并说明原因；
+//   - 其它（手动 stop / 进程关闭）：标 stopped。
+func (e *Engine) finalizeOnStop(taskCtx context.Context, taskID, explorationID int64) {
+	cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if t, err := e.db.GetTask(cleanup, taskID); err == nil && t.Status == "paused" {
+		log.Printf("engine: task %d paused by operator", taskID)
+		return
+	}
+	if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
+		msg := fmt.Sprintf("达到任务最长运行时长 %s，强制收尾", e.maxRuntime)
+		_ = e.store.SetExplorationStatus(cleanup, explorationID, "incomplete")
+		_ = e.db.SetTaskStatus(cleanup, taskID, "incomplete", msg)
+		log.Printf("engine: task %d %s", taskID, msg)
+		return
+	}
+	_ = e.store.SetExplorationStatus(cleanup, explorationID, "stopped")
+	_ = e.db.SetTaskStatus(cleanup, taskID, "stopped", "")
+	log.Printf("engine: task %d stopped", taskID)
+}
+
 // planOnce 唤醒一次 planner 并处理产出（todolist 写回 / prove_goal）
 func (e *Engine) planOnce(ctx context.Context, taskID, explorationID int64) agent.PlanResult {
 	plannerState := e.buildPlannerState(ctx, taskID, explorationID)
 	planRes := plannerRun(ctx, e.db, explorationID, plannerState)
-	_ = e.recordEngineActivity(taskID, explorationID, "planner", "唤醒规划", planRes.InputTokens, planRes.OutputTokens, planRes.Error)
+	_ = e.recordEngineActivity(ctx, taskID, explorationID, "planner", "唤醒规划", planRes.InputTokens, planRes.OutputTokens, planRes.Error)
 
 	// 跨唤醒共享记忆：把本次新派的动作写回 todolist
 	if len(planRes.NewIntentText) > 0 {
@@ -464,6 +542,21 @@ func (e *Engine) executeIntent(ctx context.Context, taskID, explorationID int64,
 		intent.ID, status, res.NewFacts, res.NewFindings, res.NewAssets)
 }
 
+// markDoneIfAllGoalsMet 仅当全部 goal 都 met 时把探索/任务标为 done。
+// 返回 true 表示已收尾。planner 可能调用 prove_goal 只证明部分 goal，
+// 此时不能直接标 done，否则会把未完成的目标误报为成功。
+func (e *Engine) markDoneIfAllGoalsMet(ctx context.Context, taskID, explorationID int64) bool {
+	allMet, metCount, totalGoals := e.goalsAllMet(ctx, explorationID)
+	if !allMet {
+		log.Printf("engine: task %d planner prove_goal 但目标未全部达成 (%d/%d)，继续闭环", taskID, metCount, totalGoals)
+		return false
+	}
+	_ = e.db.SetExplorationStatus(ctx, explorationID, "done")
+	_ = e.db.SetTaskStatus(ctx, taskID, "done", "")
+	log.Printf("engine: task %d 目标达成 (%d/%d)", taskID, metCount, totalGoals)
+	return true
+}
+
 // goalsAllMet 检查该探索下所有 goal 是否都已 met。
 // 返回 (allMet, metCount, totalGoals)
 func (e *Engine) goalsAllMet(ctx context.Context, explorationID int64) (bool, int, int) {
@@ -535,12 +628,12 @@ func (e *Engine) firstScope(ctx context.Context, taskID int64) string {
 }
 
 // recordEngineActivity 记录引擎/planner 层 activity
-func (e *Engine) recordEngineActivity(taskID, explorationID int64, step, summary string, tokIn, tokOut int, errMsg string) error {
+func (e *Engine) recordEngineActivity(ctx context.Context, taskID, explorationID int64, step, summary string, tokIn, tokOut int, errMsg string) error {
 	status := "ok"
 	if errMsg != "" {
 		status = "error"
 	}
-	_, err := e.store.LogActivity(context.Background(), db.Activity{
+	_, err := e.store.LogActivity(ctx, db.Activity{
 		TaskID:        &taskID,
 		ExplorationID: &explorationID,
 		Role:          "planner",

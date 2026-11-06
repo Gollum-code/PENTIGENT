@@ -1,0 +1,16 @@
+* text=auto
+
+# 跨平台统一 LF，避免 schema.sql 等文件出现整文件行尾 diff
+*.go      text eol=lf
+*.sql     text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.ts      text eol=lf
+*.tsx     text eol=lf
+*.css     text eol=lf
+
+# Windows 脚本保持 CRLF，避免 cmd/PowerShell 老版本换行问题
+*.ps1     text eol=crlf
+*.bat     text eol=crlf

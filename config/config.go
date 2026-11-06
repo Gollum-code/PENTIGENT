@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Config struct {
@@ -15,6 +16,9 @@ type Config struct {
 	SkillDir string `json:"skill_dir"`
 	Server   struct {
 		Addr string `json:"addr"`
+		// AllowedOrigins 额外允许的跨域来源（如开发期前端跑在 http://localhost:3000）。
+		// 空 = 只允许同源；生产嵌入模式无需配置。
+		AllowedOrigins []string `json:"allowed_origins"`
 	} `json:"server"`
 	Auth struct {
 		JWTSecret string `json:"jwt_secret"`
@@ -26,6 +30,14 @@ type Config struct {
 		Debounce int `json:"debounce_ms"`
 		// MockWriteProbe 允许 mock LLM 对目标发写操作(POST)探测（默认关闭）
 		MockWriteProbe bool `json:"mock_write_probe"`
+		// IntentBudget 单任务最大意图数（0=不限）
+		IntentBudget int `json:"intent_budget"`
+		// TokenBudget 单任务最大 token 消耗（0=不限）
+		TokenBudget int `json:"token_budget"`
+		// MaxRounds 单条意图内 worker 最多 LLM 轮次
+		MaxRounds int `json:"max_rounds"`
+		// MaxRuntimeSec 单任务最长运行时长（秒，0=不限；默认 30 分钟）
+		MaxRuntimeSec int `json:"max_runtime_sec"`
 	} `json:"agent"`
 	LLM struct {
 		Profile string `json:"profile"`
@@ -37,6 +49,11 @@ type Config struct {
 		// BashTimeoutSec bash 单次执行超时（秒，默认 30）
 		BashTimeoutSec int `json:"bash_timeout_sec"`
 	} `json:"tools"`
+	// Notify 外部通知（新漏洞推送到 IM/Webhook）
+	Notify struct {
+		// WebhookURL 非空时，每产生一条新 finding 异步 POST 一次 JSON
+		WebhookURL string `json:"webhook_url"`
+	} `json:"notify"`
 	Log struct {
 		// File 日志路径；空则只输出 stdout
 		File string `json:"file"`
@@ -55,11 +72,48 @@ func Default() *Config {
 	c.Auth.JWTSecret = "dev-secret-change-me"
 	c.Agent.Workers = 4
 	c.Agent.Debounce = 500
+	c.Agent.IntentBudget = 15
+	c.Agent.TokenBudget = 150000
+	c.Agent.MaxRounds = 12
+	c.Agent.MaxRuntimeSec = 1800 // 30 分钟：防工具/LLM 卡死导致任务无限运行
 	c.LLM.Profile = "default-mock"
+	c.Tools.BashTimeoutSec = 30
 	c.Log.File = "logs/pentigent.log"
 	c.Log.MaxSizeMB = 32
 	c.Log.MaxBackups = 5
 	return c
+}
+
+// applyEnv 允许用环境变量覆盖配置，便于 Docker/CI 部署（无需改 config.json）。
+func applyEnv(c *Config) {
+	if v := os.Getenv("PENTIGENT_DSN"); v != "" {
+		c.Database.DSN = v
+	}
+	if v := os.Getenv("PENTIGENT_ADDR"); v != "" {
+		c.Server.Addr = v
+	}
+	if v := os.Getenv("PENTIGENT_JWT_SECRET"); v != "" {
+		c.Auth.JWTSecret = v
+	}
+	if v := os.Getenv("PENTIGENT_AUTH_DISABLED"); v != "" {
+		c.Auth.Disabled = v == "1" || v == "true" || v == "TRUE"
+	}
+	if v := os.Getenv("PENTIGENT_LLM_PROFILE"); v != "" {
+		c.LLM.Profile = v
+	}
+	if v := os.Getenv("PENTIGENT_LOG_FILE"); v != "" {
+		c.Log.File = v
+	}
+	if v := os.Getenv("PENTIGENT_ALLOWED_ORIGINS"); v != "" {
+		for _, o := range strings.Split(v, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				c.Server.AllowedOrigins = append(c.Server.AllowedOrigins, o)
+			}
+		}
+	}
+	if v := os.Getenv("PENTIGENT_WEBHOOK_URL"); v != "" {
+		c.Notify.WebhookURL = v
+	}
 }
 
 func Load(path string) (*Config, error) {
@@ -74,6 +128,7 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	if path == "" {
+		applyEnv(c)
 		return c, nil
 	}
 	b, err := os.ReadFile(path)
@@ -85,5 +140,6 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(b, c); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	applyEnv(c)
 	return c, nil
 }

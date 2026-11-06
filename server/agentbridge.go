@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 
@@ -11,9 +12,17 @@ import (
 	"pentigent/intercept"
 )
 
-// agentGoalsRun 调用 goals agent 做目标分解 + 约束提取
-func agentGoalsRun(ctx context.Context, task *db.Task) agent.GoalsResult {
-	return agent.GoalsRun(ctx, task.Goal, task.Description, "", []string{})
+// agentGoalsRun 调用 goals agent 做目标分解 + 约束提取。
+// 把操作员已登记的授权范围一并传给 LLM，让它如实复述——
+// LLM 发明的新范围会被 scope 白名单丢弃，不如一开始就告诉它边界在哪。
+func agentGoalsRun(ctx context.Context, task *db.Task, scope []db.ScopeItem) agent.GoalsResult {
+	patterns := make([]string, 0, len(scope))
+	for _, s := range scope {
+		if s.Pattern != "" {
+			patterns = append(patterns, s.Pattern)
+		}
+	}
+	return agent.GoalsRun(ctx, task.Goal, task.Description, "", patterns)
 }
 
 // fallbackGoals 兜底：LLM 未返回 goals 时按任务目标构造
@@ -68,7 +77,7 @@ func agentWorkerRun(ctx context.Context, e *Engine, guard *intercept.Guard, task
 		Guard:     &guardAdapter{g: guard},
 		CompanyID: companyID,
 	}
-	return w.Run(ctx, taskID, explorationID, intent, 12)
+	return w.Run(ctx, taskID, explorationID, intent, e.maxRounds)
 }
 
 // ---- store 桥 ----
@@ -123,6 +132,12 @@ func (b *StoreBridge) ClaimNextIntent(ctx context.Context, explorationID int64, 
 		return nil, nil
 	}
 	return n, nil
+}
+
+// TouchIntent 心跳续约：worker 每轮刷新 running intent 的 claimed_at，
+// 避免长意图被 ReclaimStuckIntents 误回收重领。
+func (b *StoreBridge) TouchIntent(ctx context.Context, intentID int64) error {
+	return b.s.db.TouchIntent(ctx, intentID)
 }
 func (b *StoreBridge) AddEdge(ctx context.Context, explorationID, fromID, toID int64, relation string) error {
 	return b.s.db.AddEdge(ctx, explorationID, fromID, toID, relation)
@@ -180,6 +195,9 @@ func (b *StoreBridge) GetPendingStatus(ctx context.Context, id int64) (string, e
 	}
 	return pi.Status, nil
 }
+func (b *StoreBridge) ExpirePending(ctx context.Context, id int64) error {
+	return b.s.db.ExpirePending(ctx, id)
+}
 
 // guardAdapter 把 intercept.Guard 适配成 agent.Guard
 type guardAdapter struct{ g *intercept.Guard }
@@ -194,16 +212,77 @@ func (a *guardAdapter) Check(tool string, input map[string]any) (agent.Decision,
 	return agent.Decision{Action: d.Action, RuleID: d.RuleID, Reason: d.Reason}, nil
 }
 
-// extractDomains 从文本提取域名
+// ScopeAllows 资产入库前的范围校验（资产图是全局真值库，写入范围外目标等于越权建档）。
+func (a *guardAdapter) ScopeAllows(host string) bool {
+	return a.g.ScopeAllows(host)
+}
+
+// 明显不是主机名的后缀（文件名/编程语言/静态资源）。
+// 任务描述里常出现 "node.js"、"report.md" 这类词，若被当成域名写进 scope，
+// 会意外扩大授权范围，因此这里做保守过滤。
+var nonHostSuffix = map[string]bool{
+	"js": true, "ts": true, "jsx": true, "tsx": true, "py": true, "go": true,
+	"md": true, "sh": true, "bat": true, "ps1": true, "exe": true, "dll": true,
+	"txt": true, "json": true, "html": true, "htm": true, "css": true, "php": true,
+	"jsp": true, "asp": true, "aspx": true, "sql": true, "yaml": true, "yml": true,
+	"conf": true, "ini": true, "log": true, "tmp": true, "bak": true, "db": true,
+	"png": true, "jpg": true, "jpeg": true, "gif": true, "ico": true, "svg": true,
+	"xml": true, "csv": true, "pdf": true, "doc": true, "docx": true, "xls": true,
+	"xlsx": true, "zip": true, "tar": true, "gz": true, "rar": true, "mp4": true,
+	"mp3": true, "mov": true, "avi": true, "woff": true, "woff2": true, "ttf": true, "eot": true,
+}
+
+var nonHostExact = map[string]bool{
+	"asp.net": true, "node.js": true, "vue.js": true, "react.js": true,
+	"next.js": true, "express.js": true, "jquery.js": true, "d3.js": true,
+	"three.js": true, "socket.io": true,
+}
+
+// isLikelyHost 过滤掉明显是文件名/技术名词的 token，避免误扩授权范围。
+func isLikelyHost(s string) bool {
+	if nonHostExact[s] {
+		return false
+	}
+	i := strings.LastIndex(s, ".")
+	if i <= 0 || i == len(s)-1 {
+		return false
+	}
+	return !nonHostSuffix[s[i+1:]]
+}
+
+// extractDomains 从文本提取域名和 IP（授权范围推断用）。
 func extractDomains(s string) []string {
-	re := regexp.MustCompile(`(?i)\b([a-z0-9][a-z0-9\-\.]*\.[a-z]{2,})\b`)
 	seen := map[string]bool{}
 	var out []string
+	add := func(v string) {
+		v = strings.ToLower(strings.TrimSpace(v))
+		if v == "" || seen[v] {
+			return
+		}
+		out = append(out, v)
+		seen[v] = true
+	}
+
+	// 域名
+	re := regexp.MustCompile(`(?i)\b([a-z0-9][a-z0-9\-\.]*\.[a-z]{2,})\b`)
 	for _, m := range re.FindAllString(s, -1) {
-		low := strings.ToLower(m)
-		if !seen[low] {
-			out = append(out, low)
-			seen[low] = true
+		if isLikelyHost(strings.ToLower(m)) {
+			add(m)
+		}
+	}
+	// IPv4（描述里直接写 IP 时也要推断进 scope）
+	ipRe := regexp.MustCompile(`\b(\d{1,3}(?:\.\d{1,3}){3})\b`)
+	for _, m := range ipRe.FindAllString(s, -1) {
+		if net.ParseIP(m) != nil {
+			add(m)
+		}
+	}
+	// IPv6（含方括号写法）：先抓候选再校验，避免把时间戳当成地址
+	ipv6Re := regexp.MustCompile(`\[[0-9a-fA-F:]+\]|(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}`)
+	for _, m := range ipv6Re.FindAllString(s, -1) {
+		cand := strings.Trim(m, "[]")
+		if ip := net.ParseIP(cand); ip != nil && ip.To4() == nil {
+			add(ip.String())
 		}
 	}
 	return out

@@ -210,3 +210,27 @@ func TestFirstHostInMessages(t *testing.T) {
 		t.Error("无域名时应返回空")
 	}
 }
+
+// 资产入库前的范围校验依赖 assetHost 提取主机；各资产类型都要取对。
+func TestAssetHost(t *testing.T) {
+	cases := []struct {
+		name string
+		a    Asset
+		want string
+	}{
+		{"service 解析 URL host", Asset{Type: "service", URL: "https://api.example.com:8443/v1"}, "api.example.com"},
+		{"endpoint 解析 URL host", Asset{Type: "endpoint", URL: "http://example.com/login"}, "example.com"},
+		{"subdomain 用 domain", Asset{Type: "subdomain", Domain: "mail.example.com"}, "mail.example.com"},
+		{"ip 用 ip", Asset{Type: "ip", IP: "10.0.0.5"}, "10.0.0.5"},
+		{"缺 domain 时回退 root_domain", Asset{Type: "subdomain", RootDomain: "example.com"}, "example.com"},
+		{"app 无主机", Asset{Type: "app", AppName: "Demo", BundleID: "com.demo"}, ""},
+		{"IPv6 URL", Asset{Type: "service", URL: "http://[::1]:8080/"}, "::1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := assetHost(c.a); got != c.want {
+				t.Errorf("assetHost(%+v)=%q, want %q", c.a, got, c.want)
+			}
+		})
+	}
+}

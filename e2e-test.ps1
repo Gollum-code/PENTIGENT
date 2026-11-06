@@ -13,7 +13,7 @@ function Check($name, $cond) {
 Write-Output "=== 1. health ==="
 $h = Invoke-RestMethod -Uri "$base/api/health" -TimeoutSec 5
 Write-Output "  llm=$($h.llm) mock=$($h.mock) setup=$($h.setup) version=$($h.version)"
-Check "health ok" ($h.status -eq "ok")
+Check "health ok" ($h.status -in @("ok","degraded"))
 
 Write-Output "=== 1b. LLM connectivity probe ==="
 $llm = Invoke-RestMethod -Uri "$base/api/llm/test" -Method Post -TimeoutSec 30
@@ -21,10 +21,18 @@ Write-Output "  llm=$($llm.llm) info=$($llm.info)"
 Check "llm available" ($llm.llm -ne "")
 
 Write-Output "=== 2. auth ==="
+# 可用 PENTIGENT_ADMIN_PASSWORD 覆盖；忘记密码时运行： .\pentigent.exe -reset-admin config.json
+$adminPass = if ($env:PENTIGENT_ADMIN_PASSWORD) { $env:PENTIGENT_ADMIN_PASSWORD } else { "admin123" }
+$authBody = @{ password = $adminPass } | ConvertTo-Json -Compress
 if (-not $h.setup) {
-  $auth = Invoke-RestMethod -Uri "$base/api/auth/setup" -Method Post -Body '{"password":"admin123"}' -ContentType "application/json" -TimeoutSec 10
+  $auth = Invoke-RestMethod -Uri "$base/api/auth/setup" -Method Post -Body $authBody -ContentType "application/json" -TimeoutSec 10
 } else {
-  $auth = Invoke-RestMethod -Uri "$base/api/auth/login" -Method Post -Body '{"password":"admin123"}' -ContentType "application/json" -TimeoutSec 10
+  try {
+    $auth = Invoke-RestMethod -Uri "$base/api/auth/login" -Method Post -Body $authBody -ContentType "application/json" -TimeoutSec 10
+  } catch {
+    Write-Output "  登录失败：管理员密码不是默认值。设置 PENTIGENT_ADMIN_PASSWORD，或运行 .\pentigent.exe -reset-admin config.json 重置后重试。"
+    throw
+  }
 }
 $headers = @{ Authorization = "Bearer $($auth.token)" }
 Check "token issued" ($auth.token.Length -gt 20)
@@ -37,6 +45,20 @@ if ($h.auth_disabled) {
   try { Invoke-RestMethod -Uri "$base/api/tasks" -Method Get -TimeoutSec 5 | Out-Null } catch { $unauth = $true }
   Check "unauth rejected" $unauth
 }
+
+Write-Output "=== 3.5 unknown API returns JSON 404 ==="
+$unknownStatus = 0; $unknownJson = $false
+try {
+  Invoke-WebRequest -Uri "$base/api/definitely-not-a-route" -Method Get -Headers $headers -TimeoutSec 5 -ErrorAction Stop | Out-Null
+} catch {
+  $unknownStatus = [int]$_.Exception.Response.StatusCode
+  try {
+    $bodyText = (New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd()
+    $unknownJson = ($bodyText -match '"error"')
+  } catch { $unknownJson = $false }
+}
+Check "unknown api 404" ($unknownStatus -eq 404)
+Check "unknown api json" $unknownJson
 
 Write-Output "=== 4. create task (example.com live target) ==="
 $body = @{ name = "live-test"; goal = "Probe example.com assets and find web vulnerabilities"; description = "authorized pentest of example.com"; scope = @("example.com") } | ConvertTo-Json -Compress
@@ -122,6 +144,27 @@ Write-Output "  pending=$($p.pending.Count)"
 $r = Invoke-RestMethod -Uri "$base/api/intercept/rules" -Method Get -Headers $headers -TimeoutSec 10
 Write-Output "  rules=$($r.rules.Count)"
 Check "rules loaded" ($r.rules.Count -gt 0)
+
+Write-Output "=== 11b. create custom deny rule (must be enabled) ==="
+$ruleBody = @{ name = "e2e-deny-evil"; match_target = "tool_input"; match_type = "regex"; pattern = "denied-example\.com"; action = "deny"; priority = 10 } | ConvertTo-Json -Compress
+$rr = Invoke-RestMethod -Uri "$base/api/intercept/rules" -Method Post -Body $ruleBody -ContentType "application/json" -Headers $headers -TimeoutSec 10
+Check "rule created" ($rr.id -gt 0)
+Check "rule created enabled" ($rr.enabled -eq $true)
+$r2 = Invoke-RestMethod -Uri "$base/api/intercept/rules" -Method Get -Headers $headers -TimeoutSec 10
+$mine = @($r2.rules | Where-Object { $_.id -eq $rr.id -and $_.enabled -eq $true })
+Check "rule persisted enabled" ($mine.Count -eq 1)
+
+Write-Output "=== 11c. bad regex must be rejected ==="
+$badRejected = $false
+try {
+  $badBody = @{ name = "bad"; match_target = "tool_input"; match_type = "regex"; pattern = "([unbalanced"; action = "deny" } | ConvertTo-Json -Compress
+  Invoke-RestMethod -Uri "$base/api/intercept/rules" -Method Post -Body $badBody -ContentType "application/json" -Headers $headers -TimeoutSec 10 | Out-Null
+} catch { $badRejected = $true }
+Check "bad regex rejected" $badRejected
+if ($rr.id -gt 0) {
+  Invoke-RestMethod -Uri "$base/api/intercept/rules/$($rr.id)" -Method Delete -Headers $headers -TimeoutSec 10 | Out-Null
+  Check "test rule cleaned up" $true
+}
 
 Write-Output "=== 12. delete task ==="
 Invoke-RestMethod -Uri "$base/api/tasks/$tid" -Method Delete -Headers $headers -TimeoutSec 10 | Out-Null

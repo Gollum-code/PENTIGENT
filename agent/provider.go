@@ -44,8 +44,8 @@ type ToolParam struct {
 }
 
 type Tool struct {
-	Type     string                 `json:"type"`
-	Function FunctionSchema         `json:"function"`
+	Type     string         `json:"type"`
+	Function FunctionSchema `json:"function"`
 }
 
 type FunctionSchema struct {

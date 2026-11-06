@@ -10,8 +10,11 @@ const goalsSystemPrompt = `You are the entry Agent (Main) of an authorized penet
 
 A task has just been created. Break it down by CALLING TOOLS — plain text replies are ignored:
 1) set_goals        : decompose the objective into 1..3 verifiable sub-goals
-2) add_task_scope   : register the authorized target scope (hard boundary) from what the operator provided
-3) set_constraints  : register operator deny/allow constraints (dangerous ops)
+2) add_task_scope   : re-state the authorized target scope the operator already provided (hard boundary).
+                      NEVER invent, broaden or guess new scope — entries outside the operator-provided
+                      scope or the hosts named in the task are discarded by the engine.
+3) set_constraints  : register operator DENY constraints only (allow constraints are ignored: the LLM
+                      must not be able to weaken the human approval gate).
 
 Call these tools once and finish. Do not perform any recon here.`
 
@@ -21,12 +24,12 @@ type Goal struct {
 }
 
 type GoalsResult struct {
-	Goals         []Goal
-	Scope         []ScopeEntry
-	Constraints   []ConstraintEntry
-	InputTokens   int
-	OutputTokens  int
-	Error         string
+	Goals        []Goal
+	Scope        []ScopeEntry
+	Constraints  []ConstraintEntry
+	InputTokens  int
+	OutputTokens int
+	Error        string
 }
 
 type ScopeEntry struct {

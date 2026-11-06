@@ -1,6 +1,6 @@
 "use client";
-import { useEffect, useState } from "react";
-import { api } from "@/lib/store";
+import { Fragment, useEffect, useState } from "react";
+import { api, useToast } from "@/lib/store";
 import Nav from "@/components/Nav";
 import Pagination from "@/components/Pagination";
 
@@ -14,16 +14,28 @@ export default function Assets() {
   const [q, setQ] = useState("");
   const [coverage, setCoverage] = useState<Record<number, any>>({});
   const [open, setOpen] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   const load = async (p = page) => {
+    setLoading(true);
+    setError("");
     const params = new URLSearchParams();
     if (type) params.set("type", type);
     if (q) params.set("q", q);
     params.set("limit", String(PAGE_SIZE));
     params.set("offset", String((p - 1) * PAGE_SIZE));
-    const d = await api(`/api/assets?${params.toString()}`);
-    setAssets(d.assets || []);
-    setTotal(d.total ?? (d.assets || []).length);
+    try {
+      const d = await api(`/api/assets?${params.toString()}`);
+      setAssets(d.assets || []);
+      setTotal(d.total ?? (d.assets || []).length);
+    } catch (e: any) {
+      setError(e?.message || "网络错误");
+      setAssets([]);
+      useToast.getState().show("加载资产失败: " + (e?.message || "网络错误"));
+    } finally {
+      setLoading(false);
+    }
   };
 
   // 类型切换回到第一页
@@ -94,8 +106,8 @@ export default function Assets() {
             {assets.map((a) => {
               const c = coverage[a.id];
               return (
-                <>
-                  <tr key={a.id}>
+                <Fragment key={a.id}>
+                  <tr>
                     <td>{a.id}</td>
                     <td>
                       <span className="tag">{a.type}</span>
@@ -109,7 +121,7 @@ export default function Assets() {
                     </td>
                   </tr>
                   {open === a.id && (
-                    <tr key={`${a.id}-cov`}>
+                    <tr>
                       <td colSpan={5}>
                         <div className="act-item">
                           {c ? (
@@ -142,13 +154,13 @@ export default function Assets() {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               );
             })}
             {assets.length === 0 && (
               <tr>
                 <td colSpan={5} className="muted">
-                  暂无资产
+                  {loading ? "加载中…" : error ? "加载失败：" + error : "暂无资产"}
                 </td>
               </tr>
             )}

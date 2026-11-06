@@ -34,16 +34,26 @@ func (d *DB) ProveGoals(ctx context.Context, explorationID int64, goalIDs []int6
 			return err
 		}
 		for _, n := range nodes {
-			if err := d.SetNodeStatus(ctx, n.ID, "met"); err != nil {
+			if err := d.SetGoalMet(ctx, explorationID, n.ID); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 	for _, id := range goalIDs {
-		if err := d.SetNodeStatus(ctx, id, "met"); err != nil {
+		if err := d.SetGoalMet(ctx, explorationID, id); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// SetGoalMet 只允许把"本探索下的 goal 节点"标为 met，
+// 防止 planner 传入任意 node id（甚至其它任务的 goal）被误改。
+func (d *DB) SetGoalMet(ctx context.Context, explorationID, goalID int64) error {
+	_, err := d.pool.Exec(ctx,
+		`UPDATE exploration_nodes SET status='met', updated_at=now()
+		 WHERE id=$1 AND exploration_id=$2 AND type='goal'`,
+		goalID, explorationID)
+	return err
 }

@@ -82,8 +82,11 @@ func renderOpenAPI(base string) string {
 
 	op("search", "get", "api/search", "全局搜索（任务/资产/漏洞）", true, "query q")
 
+	op("companies", "get", "api/companies", "公司列表", true)
+
 	op("templates", "get", "api/templates", "任务模板列表", true)
 	op("templates", "post", "api/templates", "创建自定义模板", true)
+	op("templates", "put", "api/templates/{id}", "更新自定义模板", true)
 	op("templates", "delete", "api/templates/{id}", "删除自定义模板（内置不可删）", true)
 	op("report", "get", "api/report-settings", "获取报告设置", true)
 	op("report", "post", "api/report-settings", "更新报告设置", true)

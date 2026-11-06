@@ -39,7 +39,9 @@
 ```
 
 打开浏览器访问 http://127.0.0.1:8080
-首次需要设置管理员密码（或跳过 —— 直接 curl 走 API 也行）。
+- 仓库默认 `config.json` 使用 `default-mock`（无需 key）+ `auth.disabled=true`（本地演示）。
+- 若打开鉴权（`auth.disabled=false` 且已替换 `jwt_secret`），首次访问会自动跳到 `/login` 设置管理员密码。
+- 命令行/CI 仍可用 `Authorization: Bearer <token>` 调 API；浏览器登录后会同时写入 HttpOnly cookie。
 
 ### 2.3 手动构建
 
@@ -152,8 +154,14 @@ curl -X POST http://127.0.0.1:8080/api/llm/test
 ```
 
 - 规则：`match_target=tool_name/tool_input` × `match_type=string/regex` × `action=allow/deny/ask`
+  - `tool_name` 规则对所有工具生效；`tool_input` 规则只对执行类工具（`bash`/`webfetch`）生效，
+    避免把命令模式套到资产/事实/漏洞的文本数据上（否则记录"含 `rm -rf` 的 RCE 漏洞"会被误拒）
 - **资产硬边界**：bash/webfetch 参数里解析出的 host/url 不在任务范围 → 直接 deny（代码硬判）
-- 内置规则含：`rm -rf` / `/etc/shadow` / 云元数据 169.254.169.254 等拒绝项
+- **本机/回环地址**不再被单独硬禁：与普通目标一样由 `task_scope` 裁决，因此可授权本地靶场（如 DVWA）
+- **重定向**：webfetch 每次 302 都会重新过 guard；bash 里 `curl -L/--location` 因无法预判跳转目标而 fail-closed 拒绝
+- 操作员 `allow` 约束命中时可跳过 ask 规则（仍不能绕过 deny 规则/硬边界）
+- **授权范围白名单**：goals LLM 无权扩大 `task_scope`，越权条目直接丢弃并记审计日志（`server/scope_policy.go`）
+- 内置规则含：`rm -rf` / `mkfs` / `/etc/shadow` / 云元数据 169.254.169.254 等，另有 Windows 破坏性命令（递归删除/格式化/注册表写删/关机/卷影删除/编码命令）见迁移 `0002_guard_hardening.sql`
 
 ## 6. API
 
@@ -167,7 +175,7 @@ POST   /api/tasks/:id/start    启动
 POST   /api/tasks/:id/pause    暂停（断点续跑：探索标 paused，下次 start 恢复未完成 intent）
 POST   /api/tasks/:id/stop     停止
 DELETE /api/tasks/:id          删除（级联清理）
-GET    /api/tasks/:id/events   SSE 活动流
+GET    /api/tasks/:id/events   SSE 活动流（支持 Last-Event-ID；EventSource 可用 ?token= 兜底鉴权）
 GET    /api/tasks/:id/graph    探索图数据
 GET    /api/assets             资产图（按类型/公司过滤）
 GET    /api/findings           漏洞列表
@@ -185,6 +193,7 @@ GET    /api/findings?task=&severity=&limit=50&offset=0 → { findings, total, li
 
 | 页面 | 路由 | 内容 |
 |---|---|---|
+| 登录/初始化 | `/login` | 首次设置管理员密码 + 登录（鉴权开启时自动跳转） |
 | 仪表盘 | `/` | 任务列表 + 新建 + 启动/停止 |
 | 任务详情 | `/tasks/[id]` | 探索图可视化 + SSE 活动流 + 节点详情 |
 | 资产 | `/assets` | 资产图列表（类型/关键字过滤） |
@@ -198,7 +207,9 @@ PENTIGENT/
 ├── cmd/PENTIGENT/main.go         入口
 ├── config/config.go          配置
 ├── db/
-│   ├── schema.sql            幂等建表（go:embed）
+│   ├── migrations/
+│   │   ├── 0001_init.sql     幂等建表基线（go:embed）
+│   │   └── 0002_guard_hardening.sql  破坏性命令默认规则加固
 │   ├── db.go                 pgx pool
 │   ├── assets.go             资产图 store
 │   ├── exploration.go        探索图 store
@@ -219,6 +230,7 @@ PENTIGENT/
 │   ├── server.go            路由 + JWT + SSE
 │   ├── handlers.go          REST handlers
 │   ├── engine.go            事件驱动闭环
+│   ├── scope_policy.go      LLM 授权范围白名单（防提示注入扩大 scope）
 │   └── agentbridge.go       agent↔engine 桥
 ├── intercept/
 │   ├── guard.go             审批门
@@ -256,19 +268,50 @@ PENTIGENT/
 | 前端搜索分页 | ✅ 已做（assets/findings limit+offset+total） |
 | LLM 连通性自检 | ✅ 已做（/api/llm/test） |
 
-## 10. 核心机制修复记录
+## 11. 核心机制修复记录
 
 | 机制 | 状态 | 说明 |
 |---|---|---|
 | planner 跨唤醒 todolist | ✅ 已实现 | 每次唤醒读回并注入提示词；新派动作写回 DB |
 | 目标达成校验 | ✅ 已实现 | goal 未全 met 时收敛标 `incomplete`，不误报 done |
 | intent 超时回收 | ✅ 已实现 | `ReclaimStuckIntents` 回收崩溃 worker 留下的 running |
+| worker 心跳续约 | ✅ 已实现 | worker 每轮刷新 `claimed_at`，长意图不再被误回收重领 |
 | ask 审批重试 | ✅ 已实现 | worker 有界轮询人工裁决（默认 120s），放行则继续执行 |
-| pause 断点续跑 | ✅ 已实现 | 暂停保留探索，下次 start 恢复未完成 intent |
+| pause 断点续跑 | ✅ 已实现 | 暂停保留探索，下次 start 恢复未完成 intent；`Stop` 等待 goroutine 退出，暂停后立即启动不再误报 |
 | 日志落文件 | ✅ 已实现 | `logging` 包按大小轮转（默认 logs/PENTIGENT.log） |
 | 资产公司归属 | ✅ 已实现 | 从 task 查真实 company_id，不再硬编码 |
+| 请求体大小上限 | ✅ 已实现 | router 入口 `MaxBytesReader` 1 MiB |
+| 口令存储 | ✅ 已实现 | bcrypt（随机盐），不再用 SHA-256 |
+| JWT 算法校验 | ✅ 已实现 | 显式限定 HS256；启用鉴权时默认 secret 拒绝启动 |
+| SSE 断线续传 | ✅ 已实现 | 服务端写 `id:`，读取 `Last-Event-ID`，前端断线重连带 `lastEventId` 补推 |
+| 浏览器鉴权链路 | ✅ 已实现 | 登录写 HttpOnly cookie；SSE/报告导出带鉴权 |
+| 重定向越权防护 | ✅ 已实现 | webfetch 每次 302 重新过 guard；bash curl -L fail-closed |
 
-## 10. 与 PENTIGENT 的差异（有意简化）
+### 安全与可靠性加固（0002 迁移 + 引擎侧）
+
+| 项 | 说明 |
+|---|---|
+| 授权范围白名单收敛 | goals LLM 提出的 `add_task_scope` 只接受落在"操作员登记范围 ∪ 任务描述主机"内的条目，越权条目丢弃并记审计日志——提示注入无法扩大 `task_scope` |
+| LLM 约束只收 deny | goals LLM 提出的 allow 约束被忽略（allow 会跳过 ask 审批，等于让 LLM 削弱审批门） |
+| 本地探测误判修复 | `selfProbeDenied` 只拦"本地路径形态"的敏感文件访问；授权目标 URL 路径上的 `/.env`、`/config.json` 等常规检查点不再被误拒；`mkdir` 不再被 "dir " 子串误伤 |
+| Windows 破坏性命令默认拒绝 | 新增迁移 `0002_guard_hardening.sql`：递归/强制删除、格式化/清盘、注册表写删、关机重启、卷影删除、远程脚本下载执行、编码命令、清历史 |
+| CORS 收紧 | 移除 `Access-Control-Allow-Origin: *`（API 支持同源 cookie 鉴权，通配符会被第三方脚本滥用），只回显同源 origin |
+| 未知 API 返回 JSON 404 | 未匹配的 `/api/*` 不再兜底到 SPA 的 HTML，返回 JSON 404 |
+| ListPending 参数位号修复 | `status` 为空时 SQL 参数位错（`$2` 只有 1 个参数）导致的查询失败已修复 |
+| GetPending 时间戳扫描 | `created_at::text` 与全库写法一致，人工审批轮询不再依赖驱动隐式转换 |
+| 停止时状态可持久化 | 引擎收尾改用独立超时上下文（原 ctx 已取消，状态写不进去）；`paused` 不被 `stopped` 覆盖 |
+| 僵尸探索恢复 | 修复 `findResumable` 中恒为 false 的判断：进程崩溃遗留的 `running` 探索现在会真正断点续跑，而不是新建探索、遗弃旧意图 |
+| 任务运行时长上限 | 新增 `agent.max_runtime_sec`（默认 1800s）：超时标记 `incomplete` 并强制收尾，防工具/LLM 卡死无限运行 |
+| 审批裁决幂等 | 只允许裁决 `pending` 记录；已裁决/过期记录返回 404，避免"补批"显示成功但无效果 |
+| 前端 SSE 补推 | 断线重连携带 `lastEventId`，不再丢失断线窗口内的事件；并显示"重连中"状态 |
+| 前端体验修复 | 导航高亮在 `trailingSlash` 下恢复；资产页补加载/错误态；资产表修复无 key Fragment 警告；导出/保存备注/删规则补错误提示与二次确认；漏洞页导出按钮归位到工具栏 |
+| 审批规则默认启用 | 修复 UI 新建规则因 `enabled` 零值而"创建即禁用、静默失效"的问题；写入前校验 match_target/match_type/action 并编译正则，坏正则不再静默存库 |
+| 指令规则作用域 | `tool_input` 规则与操作员约束只作用于 `bash/webfetch`；写图工具（资产/事实/漏洞）的文本数据不再被命令黑名单误拒（如漏洞标题含 `rm -rf`） |
+| IPv6 纳入硬边界 | 提取/规范化 IPv6（`[::1]:8080`、`0:0:0:0:0:0:0:1` 等），此前 `http://[::1]/` 会因抓不到 host 而绕过范围校验；任务描述里的 IPv6 也能推断进 scope |
+| 报告按任务收敛 | 任务报告/覆盖度改走"探索锚点"只取本任务资产，不再把全局资产库其它任务的资产混进报告 |
+| 资产入库范围校验 | `insert_assets` 逐资产校验 host 是否在授权范围内（`Guard.ScopeAllows`），范围外资产不入库：资产图是全局真值库，否则等于让 LLM 越权建档并污染其它任务 |
+
+## 12. 与 PENTIGENT 的差异（有意简化）
 
 | 维度 | PENTIGENT | 本 MVP |
 |---|---|---|
@@ -277,12 +320,13 @@ PENTIGENT/
 | 上下文 | 每轮全量图 + 复杂压缩 | 增量 delta + 固定窗口 |
 | token 预算 / 流量代理 / 通知 | 有 | 后置，MVP 不做 |
 
-## 11. 风险与对策
+## 13. 风险与对策
 
 | 风险 | 对策 |
 |---|---|
-| LLM 烧钱 | frontier 空就不调 LLM + 上下文固定窗口 |
-| agent 跑偏/死循环 | 迭代上限 60 次强制收尾 + worker 单意图边界 + 审批门兜底 |
+| LLM 烧钱 | frontier 空就不调 LLM + 上下文固定窗口 + 意图/token 预算 |
+| agent 跑偏/死循环 | 单意图 LLM 轮次上限（默认 12）+ 任务时长上限（默认 30 分钟）+ 审批门兜底 |
+| 授权范围被 LLM 扩大 | `scope_policy.go` 白名单收敛：只有操作员提供/任务描述中的主机可写入 scope |
 | 资产数据脏 | 唯一索引去重 + 程序算父子关系 + 入库前校验 |
 | 越权探测 | 资产硬边界代码硬判（不依赖提示词） |
 | 无 LLM key | mock provider 先跑通全流程，配 key 即切真实 |

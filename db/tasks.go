@@ -18,9 +18,9 @@ type Task struct {
 	StartedAt   string `json:"started_at,omitempty"`
 	FinishedAt  string `json:"finished_at,omitempty"`
 	// 聚合统计
-	Findings int `json:"findings"`
-	Assets   int `json:"assets"`
-	TokensIn int `json:"tokens_in"`
+	Findings  int `json:"findings"`
+	Assets    int `json:"assets"`
+	TokensIn  int `json:"tokens_in"`
 	TokensOut int `json:"tokens_out"`
 }
 
@@ -79,6 +79,16 @@ func (d *DB) CloneTask(ctx context.Context, srcID int64, newName, newGoal string
 			return 0, err
 		}
 	}
+	// 复制操作员约束（deny/allow），否则副本会丢失安全护栏
+	constraints, err := d.ListConstraints(ctx, srcID)
+	if err != nil {
+		return 0, err
+	}
+	for _, c := range constraints {
+		if err := d.AddConstraint(ctx, tid, c.Kind, c.Pattern); err != nil {
+			return 0, err
+		}
+	}
 	// 复制备注
 	if src.Notes != "" {
 		if err := d.SetTaskNotes(ctx, tid, src.Notes); err != nil {
@@ -134,7 +144,7 @@ func (d *DB) ListTasks(ctx context.Context, status, q string, limit, offset int)
 	sql := `SELECT t.id, t.name, t.goal, t.description, t.notes, t.company_id, t.status, t.error, t.created_at::text,
 		        COALESCE(t.started_at::text,''), COALESCE(t.finished_at::text,''),
 		        COALESCE((SELECT COUNT(*) FROM findings f WHERE f.task_id=t.id),0)::int,
-		        COALESCE((SELECT COUNT(*) FROM exploration_anchors a JOIN explorations e ON e.id=a.exploration_id WHERE e.task_id=t.id),0)::int,
+		        COALESCE((SELECT COUNT(DISTINCT a.asset_id) FROM exploration_anchors a JOIN explorations e ON e.id=a.exploration_id WHERE e.task_id=t.id),0)::int,
 		        COALESCE((SELECT SUM(ac.input_tokens) FROM activity ac WHERE ac.task_id=t.id),0)::int,
 		        COALESCE((SELECT SUM(ac.output_tokens) FROM activity ac WHERE ac.task_id=t.id),0)::int
 		 FROM tasks t ` + where + fmt.Sprintf(" ORDER BY t.id DESC LIMIT $%d OFFSET $%d", idx, idx+1)
@@ -317,19 +327,19 @@ func (d *DB) ListConstraints(ctx context.Context, taskID int64) ([]struct {
 // ---- activity ----
 
 type Activity struct {
-	ID           int64          `json:"id"`
-	TaskID       *int64         `json:"task_id,omitempty"`
-	ExplorationID *int64        `json:"exploration_id,omitempty"`
-	NodeID       *int64         `json:"node_id,omitempty"`
-	Role         string         `json:"role"`
-	Step         string         `json:"step"`
-	Tool         string         `json:"tool,omitempty"`
-	Input        map[string]any `json:"input,omitempty"`
-	Output       map[string]any `json:"output,omitempty"`
-	Status       string         `json:"status"`
-	InputTokens  int            `json:"input_tokens"`
-	OutputTokens int            `json:"output_tokens"`
-	CreatedAt    string         `json:"created_at,omitempty"`
+	ID            int64          `json:"id"`
+	TaskID        *int64         `json:"task_id,omitempty"`
+	ExplorationID *int64         `json:"exploration_id,omitempty"`
+	NodeID        *int64         `json:"node_id,omitempty"`
+	Role          string         `json:"role"`
+	Step          string         `json:"step"`
+	Tool          string         `json:"tool,omitempty"`
+	Input         map[string]any `json:"input,omitempty"`
+	Output        map[string]any `json:"output,omitempty"`
+	Status        string         `json:"status"`
+	InputTokens   int            `json:"input_tokens"`
+	OutputTokens  int            `json:"output_tokens"`
+	CreatedAt     string         `json:"created_at,omitempty"`
 }
 
 func (d *DB) LogActivity(ctx context.Context, a Activity) (int64, error) {
@@ -356,6 +366,31 @@ func (d *DB) ListActivityAfter(ctx context.Context, taskID int64, afterID int64,
 	rows, err := d.pool.Query(ctx,
 		`SELECT id, task_id, exploration_id, node_id, role, step, tool, input, output, status, input_tokens, output_tokens, created_at::text
 		 FROM activity WHERE task_id=$1 AND id>$2 ORDER BY id ASC LIMIT $3`, taskID, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Activity
+	for rows.Next() {
+		var a Activity
+		if err := rows.Scan(&a.ID, &a.TaskID, &a.ExplorationID, &a.NodeID, &a.Role, &a.Step, &a.Tool,
+			&a.Input, &a.Output, &a.Status, &a.InputTokens, &a.OutputTokens, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ListRecentActivity 取任务最近 limit 条活动（按 id 升序返回，供 SSE 首次连接）。
+func (d *DB) ListRecentActivity(ctx context.Context, taskID int64, limit int) ([]Activity, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := d.pool.Query(ctx,
+		`SELECT id, task_id, exploration_id, node_id, role, step, tool, input, output, status, input_tokens, output_tokens, created_at::text
+		 FROM (SELECT * FROM activity WHERE task_id=$1 ORDER BY id DESC LIMIT $2) sub
+		 ORDER BY id ASC`, taskID, limit)
 	if err != nil {
 		return nil, err
 	}

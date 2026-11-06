@@ -10,12 +10,15 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 func isWindows() bool { return runtime.GOOS == "windows" }
 
-// ExecNative 执行真实工具：bash / webfetch
-func ExecNative(ctx context.Context, tool string, args map[string]any) (string, error) {
+// ExecNative 执行真实工具：bash / webfetch。
+// redirectCheck 在 webfetch 每次重定向时调用，用于重新校验目标是否仍在授权范围内
+// （否则一个已授权 URL 可 302 到任意域，绕过 guard 的硬边界）。
+func ExecNative(ctx context.Context, tool string, args map[string]any, redirectCheck func(url string) error) (string, error) {
 	switch tool {
 	case "bash":
 		cmd, _ := args["command"].(string)
@@ -23,9 +26,40 @@ func ExecNative(ctx context.Context, tool string, args map[string]any) (string, 
 	case "webfetch":
 		url, _ := args["url"].(string)
 		method, _ := args["method"].(string)
-		return runWebfetch(ctx, url, method)
+		return runWebfetch(ctx, url, method, redirectCheck)
 	}
 	return "", fmt.Errorf("未知工具 %q", tool)
+}
+
+// bashTimeout 单次 bash 执行超时（可由 config.tools.bash_timeout_sec 覆盖）。
+var bashTimeoutNanos atomic.Int64
+
+func init() { bashTimeoutNanos.Store(int64(30 * time.Second)) }
+
+// SetBashTimeoutSeconds 设置 bash 超时；n<=0 保持默认。
+func SetBashTimeoutSeconds(n int) {
+	if n > 0 {
+		bashTimeoutNanos.Store(int64(n) * int64(time.Second))
+	}
+}
+
+func bashTimeout() time.Duration {
+	d := time.Duration(bashTimeoutNanos.Load())
+	if d <= 0 {
+		return 30 * time.Second
+	}
+	return d
+}
+
+// truncateUTF8 按 rune 边界截断，避免把多字节字符切断产生非法 UTF-8。
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func runBash(ctx context.Context, command string) (string, error) {
@@ -33,7 +67,7 @@ func runBash(ctx context.Context, command string) (string, error) {
 		return "", fmt.Errorf("空命令")
 	}
 	// 超时保护
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, bashTimeout())
 	defer cancel()
 
 	var cmd *exec.Cmd
@@ -46,7 +80,7 @@ func runBash(ctx context.Context, command string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	s := strings.TrimSpace(string(out))
 	if len(s) > 8192 {
-		s = s[:8192] + "\n...[truncated]"
+		s = truncateUTF8(s, 8192) + "\n...[truncated]"
 	}
 	if err != nil {
 		return s, fmt.Errorf("bash exit: %w (output: %s)", err, s)
@@ -78,7 +112,7 @@ func currentUserAgent() string {
 	return "pentigent-pentest/1.0"
 }
 
-func runWebfetch(ctx context.Context, url, method string) (string, error) {
+func runWebfetch(ctx context.Context, url, method string, redirectCheck func(string) error) (string, error) {
 	if url == "" {
 		return "", fmt.Errorf("空 url")
 	}
@@ -107,6 +141,12 @@ func runWebfetch(ctx context.Context, url, method string) (string, error) {
 			if len(via) >= 5 {
 				return fmt.Errorf("重定向过多")
 			}
+			// 重定向目标必须重新过审批门/硬边界，防止用 302 绕出授权范围
+			if redirectCheck != nil {
+				if err := redirectCheck(r.URL.String()); err != nil {
+					return fmt.Errorf("重定向被拦截: %w", err)
+				}
+			}
 			return nil
 		},
 	}
@@ -118,7 +158,7 @@ func runWebfetch(ctx context.Context, url, method string) (string, error) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	text := string(body)
 	if len(text) > 8192 {
-		text = text[:8192]
+		text = truncateUTF8(text, 8192)
 	}
 	// 提取 title
 	title := extractTitle(text)

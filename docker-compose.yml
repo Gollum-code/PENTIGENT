@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pentigent
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pentigent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      PENTIGENT_DSN: postgres://postgres:postgres@db:5432/pentigent?sslmode=disable
+      PENTIGENT_ADDR: ":8080"
+      # 本地演示默认关闭鉴权；生产请设为 false 并设置强 JWT secret
+      PENTIGENT_AUTH_DISABLED: "${PENTIGENT_AUTH_DISABLED:-true}"
+      PENTIGENT_JWT_SECRET: "${PENTIGENT_JWT_SECRET:-change-me-in-production}"
+      PENTIGENT_LLM_PROFILE: "${PENTIGENT_LLM_PROFILE:-default-mock}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-}"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
