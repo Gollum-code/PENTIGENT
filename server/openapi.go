@@ -15,7 +15,7 @@ func renderOpenAPI(base string) string {
 	w("info:")
 	w("  title: PENTIGENT API")
 	w("  description: AI 渗透测试系统 REST API（双图 + planner/worker 闭环）")
-	w("  version: 0.1.0")
+	w("  version: %s", Version)
 	w("servers:")
 	w("  - url: %s", base)
 	w("components:")

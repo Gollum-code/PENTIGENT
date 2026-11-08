@@ -473,6 +473,11 @@ func (e *Engine) planOnce(ctx context.Context, taskID, explorationID int64) agen
 // dispatchAsync 并发 worker：每个 claim 一条 open intent 执行，不阻塞等待。
 // 每个 worker 完成时触发 signal（图变更 → 唤醒 planner）。
 func (e *Engine) dispatchAsync(ctx context.Context, taskID, explorationID int64, guard *intercept.Guard, signal func()) {
+	// 没有 open intent 就不再派发：每次唤醒最多会做 workers 次
+	// "Begin + SELECT FOR UPDATE + Rollback" 的空事务，收敛期这些全是白费。
+	if n, err := e.store.CountNodes(ctx, explorationID, "intent", "open"); err == nil && n == 0 {
+		return
+	}
 	for i := 0; i < e.workers; i++ {
 		if !e.acquireWorker(taskID) {
 			break // 已达并发上限

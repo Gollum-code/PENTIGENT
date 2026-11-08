@@ -112,6 +112,26 @@ func currentUserAgent() string {
 	return "pentigent-pentest/1.0"
 }
 
+// webfetchTimeoutNanos 单次 webfetch 超时（可由 config.tools.webfetch_timeout_sec 覆盖）。
+var webfetchTimeoutNanos atomic.Int64
+
+func init() { webfetchTimeoutNanos.Store(int64(20 * time.Second)) }
+
+// SetWebfetchTimeoutSeconds 设置 webfetch 超时；n<=0 保持默认。
+func SetWebfetchTimeoutSeconds(n int) {
+	if n > 0 {
+		webfetchTimeoutNanos.Store(int64(n) * int64(time.Second))
+	}
+}
+
+func webfetchTimeout() time.Duration {
+	d := time.Duration(webfetchTimeoutNanos.Load())
+	if d <= 0 {
+		return 20 * time.Second
+	}
+	return d
+}
+
 func runWebfetch(ctx context.Context, url, method string, redirectCheck func(string) error) (string, error) {
 	if url == "" {
 		return "", fmt.Errorf("空 url")
@@ -120,7 +140,8 @@ func runWebfetch(ctx context.Context, url, method string, redirectCheck func(str
 		method = http.MethodGet
 	}
 	method = strings.ToUpper(method)
-	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	timeout := webfetchTimeout()
+	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var payload io.Reader
@@ -136,7 +157,7 @@ func runWebfetch(ctx context.Context, url, method string, redirectCheck func(str
 	}
 	req.Header.Set("User-Agent", currentUserAgent())
 	client := &http.Client{
-		Timeout: 20 * time.Second,
+		Timeout: timeout,
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return fmt.Errorf("重定向过多")

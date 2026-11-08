@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -48,6 +49,8 @@ type Config struct {
 		UserAgent string `json:"user_agent"`
 		// BashTimeoutSec bash 单次执行超时（秒，默认 30）
 		BashTimeoutSec int `json:"bash_timeout_sec"`
+		// WebfetchTimeoutSec webfetch 单次请求超时（秒，默认 20）
+		WebfetchTimeoutSec int `json:"webfetch_timeout_sec"`
 	} `json:"tools"`
 	// Notify 外部通知（新漏洞推送到 IM/Webhook）
 	Notify struct {
@@ -78,6 +81,7 @@ func Default() *Config {
 	c.Agent.MaxRuntimeSec = 1800 // 30 分钟：防工具/LLM 卡死导致任务无限运行
 	c.LLM.Profile = "default-mock"
 	c.Tools.BashTimeoutSec = 30
+	c.Tools.WebfetchTimeoutSec = 20
 	c.Log.File = "logs/pentigent.log"
 	c.Log.MaxSizeMB = 32
 	c.Log.MaxBackups = 5
@@ -113,6 +117,16 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("PENTIGENT_WEBHOOK_URL"); v != "" {
 		c.Notify.WebhookURL = v
+	}
+	if v := os.Getenv("PENTIGENT_BASH_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Tools.BashTimeoutSec = n
+		}
+	}
+	if v := os.Getenv("PENTIGENT_WEBFETCH_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Tools.WebfetchTimeoutSec = n
+		}
 	}
 }
 

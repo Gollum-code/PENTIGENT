@@ -435,6 +435,17 @@ func serializeInput(input map[string]any) string {
 	return string(b)
 }
 
+// extractHosts 用的正则在包级编译一次：
+// guard 的 Check 对每次 bash/webfetch 调用都会执行这段提取，
+// 每次重新 MustCompile 会在热路径上白白消耗 CPU 与内存。
+var (
+	reURLHost    = regexp.MustCompile(`https?://([a-zA-Z0-9\-\.]+(?::\d+)?)`)
+	reFlagHost   = regexp.MustCompile(`(?i)(?:--?[a-z\-]*(?:computername|host|server|domain|target|addr|ip|hostname)[a-z\-]*)\s+["']?(\[[0-9a-fA-F:]+\]|[a-z0-9][a-z0-9\-]*\.[a-z0-9\-\.]*(?::\d+)?|[0-9]{1,3}(?:\.[0-9]{1,3}){3})["']?`)
+	reIPv4       = regexp.MustCompile(`\b([0-9]{1,3}(?:\.[0-9]{1,3}){3})\b`)
+	reIPv6Cand   = regexp.MustCompile(`\[[0-9a-fA-F:]+\]|(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}`)
+	reBareDomain = regexp.MustCompile(`\b([a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)\b`)
+)
+
 // extractHosts 从工具入参中解析出目标 host / URL / IP
 func extractHosts(tool string, input map[string]any) []string {
 	var raw string
@@ -465,8 +476,7 @@ func extractHosts(tool string, input map[string]any) []string {
 	}
 
 	// 1) URL 里的 host
-	urlRe := regexp.MustCompile(`https?://([a-zA-Z0-9\-\.]+(?::\d+)?)`)
-	for _, m := range urlRe.FindAllStringSubmatch(raw, -1) {
+	for _, m := range reURLHost.FindAllStringSubmatch(raw, -1) {
 		if len(m) > 1 {
 			add(m[1])
 		}
@@ -475,8 +485,7 @@ func extractHosts(tool string, input map[string]any) []string {
 	// 2) 显式主机参数：-ComputerName / -Host / -Server / -Domain / --host / -target ...
 	//    域名部分要求含点，避免把 IPv6 的 "fe80" 前缀当成独立主机；
 	//    额外支持方括号 IPv6（-Host [::1]）。
-	flagRe := regexp.MustCompile(`(?i)(?:--?[a-z\-]*(?:computername|host|server|domain|target|addr|ip|hostname)[a-z\-]*)\s+["']?(\[[0-9a-fA-F:]+\]|[a-z0-9][a-z0-9\-]*\.[a-z0-9\-\.]*(?::\d+)?|[0-9]{1,3}(?:\.[0-9]{1,3}){3})["']?`)
-	for _, m := range flagRe.FindAllStringSubmatch(raw, -1) {
+	for _, m := range reFlagHost.FindAllStringSubmatch(raw, -1) {
 		if len(m) > 1 {
 			add(m[1])
 		}
@@ -484,8 +493,7 @@ func extractHosts(tool string, input map[string]any) []string {
 
 	// 3) 命令行里出现的裸 IP（fail-closed：任何 IP 都当作探测目标）
 	//    注意：IP 在域名规则之前抓取，避免 1.2.3.4 被当成域名后缀。
-	ipRe := regexp.MustCompile(`\b([0-9]{1,3}(?:\.[0-9]{1,3}){3})\b`)
-	for _, m := range ipRe.FindAllStringSubmatch(raw, -1) {
+	for _, m := range reIPv4.FindAllStringSubmatch(raw, -1) {
 		if len(m) > 1 {
 			add(m[1])
 		}
@@ -493,8 +501,7 @@ func extractHosts(tool string, input map[string]any) []string {
 
 	// 3.5) IPv6 地址（URL 里通常带方括号 http://[::1]:8080/，命令行里也可能裸写）。
 	//      先抓候选再用 net.ParseIP 校验，避免把时间戳 12:34:56 之类当成地址。
-	ipv6Re := regexp.MustCompile(`\[[0-9a-fA-F:]+\]|(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}`)
-	for _, m := range ipv6Re.FindAllString(raw, -1) {
+	for _, m := range reIPv6Cand.FindAllString(raw, -1) {
 		cand := strings.Trim(m, "[]")
 		if ip := net.ParseIP(cand); ip != nil && ip.To4() == nil {
 			add(ip.String())
@@ -503,8 +510,7 @@ func extractHosts(tool string, input map[string]any) []string {
 
 	// 4) 命令行里出现的裸域名（fail-closed：抓所有像域名的 token）
 	//    排除常见文件扩展名，避免把 out.txt / config.json 误当目标。
-	domainRe := regexp.MustCompile(`\b([a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)\b`)
-	for _, m := range domainRe.FindAllStringSubmatch(raw, -1) {
+	for _, m := range reBareDomain.FindAllStringSubmatch(raw, -1) {
 		if len(m) > 1 && !isFileExt(m[1]) {
 			add(m[1])
 		}
@@ -603,6 +609,5 @@ func extractURLs(tool string, input map[string]any) []string {
 	if raw == "" {
 		return nil
 	}
-	urlRe := regexp.MustCompile(`https?://[^\s"'` + "`" + `]+`)
-	return urlRe.FindAllString(raw, -1)
+	return bashURLRe.FindAllString(raw, -1)
 }

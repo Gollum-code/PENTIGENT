@@ -32,12 +32,16 @@ const maxBodyBytes = 1 << 20 // 1 MiB
 // setupLockID 收敛并发首次设置（advisory xact lock）
 const setupLockID int64 = 7271_0002
 
+// route 列表在启动时构建一次：
+// Handler 对每个请求都要遍历它，若每次现构建会重复分配 ~40 条路由的切片。
 type Server struct {
 	cfg    *config.Config
 	db     *db.DB
 	engine *Engine
 	// serveStatic 由 cmd 注入（go:embed 前端）
 	serveStatic http.Handler
+
+	routesList []route
 
 	// LLM 健康缓存（避免 health 被 LLM 延迟阻塞）
 	llmMu          sync.Mutex
@@ -99,7 +103,7 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 	}
 	// 0 = 不限；配置来自 config.Default()/JSON，缺省为 30 分钟
 	engine.maxRuntime = time.Duration(cfg.Agent.MaxRuntimeSec) * time.Second
-	return &Server{
+	s := &Server{
 		cfg:          cfg,
 		db:           database,
 		engine:       engine,
@@ -107,6 +111,17 @@ func NewServer(cfg *config.Config, database *db.DB) *Server {
 		llmLimiter:   newRateLimiter(10, time.Minute),
 		sse:          newSSEHub(database),
 	}
+	s.routesList = s.routes() // 单 goroutine 内构建一次，请求处理不再重复分配
+	return s
+}
+
+// routesFor 返回路由表：优先用启动时缓存的一份，
+// 直接构造 Server{} 的测试没有缓存则现场构建兜底。
+func (s *Server) routesFor() []route {
+	if s.routesList == nil {
+		s.routesList = s.routes()
+	}
+	return s.routesList
 }
 
 func (s *Server) Engine() *Engine { return s.engine }
@@ -218,7 +233,7 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 
-		for _, rt := range s.routes() {
+		for _, rt := range s.routesFor() {
 			if rt.Method != r.Method {
 				continue
 			}
@@ -524,6 +539,14 @@ func (s *Server) originAllowed(origin string) bool {
 func (s *Server) ctx() context.Context { return context.Background() }
 
 func matchPath(pattern, path string) (map[string]string, bool) {
+	// 快路径：绝大多数路由（约 40 条里的 35 条）不含路径参数，
+	// 直接字符串比较即可，避免为每条路由做两次 Split 分配。
+	if !strings.Contains(pattern, ":") {
+		if pattern == path {
+			return map[string]string{}, true
+		}
+		return nil, false
+	}
 	pp := strings.Split(strings.Trim(pattern, "/"), "/")
 	rp := strings.Split(strings.Trim(path, "/"), "/")
 	if len(pp) != len(rp) {

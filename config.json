@@ -22,7 +22,8 @@
   },
   "tools": {
     "user_agent": "",
-    "bash_timeout_sec": 30
+    "bash_timeout_sec": 30,
+    "webfetch_timeout_sec": 20
   },
   "llm": {
     "profile": "default-mock"

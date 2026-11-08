@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, apiSafe, useAuth, useToast } from "@/lib/store";
+import { api, apiSafe, pageVisible, useAuth, useToast } from "@/lib/store";
 import Nav from "@/components/Nav";
 import Pagination from "@/components/Pagination";
 import StatsBar from "@/components/StatsBar";
@@ -60,8 +60,10 @@ function Dashboard() {
     api("/api/templates")
       .then((d) => setTemplates(d.templates || []))
       .catch(() => {});
-    // 自动轮询：任务运行状态/发现数实时更新
-    const iv = setInterval(() => load(page, statusFilter, search), 3000);
+    // 自动轮询：任务运行状态/发现数实时更新（后台标签页暂停）
+    const iv = setInterval(() => {
+      if (pageVisible()) load(page, statusFilter, search);
+    }, 3000);
     return () => clearInterval(iv);
   }, [page, statusFilter, search]);
 

@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { apiSafe } from "@/lib/store";
+import { apiSafe, pageVisible } from "@/lib/store";
 import Nav from "@/components/Nav";
 
 export default function Intercept() {
@@ -27,8 +27,18 @@ export default function Intercept() {
 
   useEffect(() => {
     load();
-    const iv = setInterval(load, 3000);
-    return () => clearInterval(iv);
+    // 后台标签页暂停轮询（审批项回来时刷新一次即可）
+    const iv = setInterval(() => {
+      if (pageVisible()) load();
+    }, 3000);
+    const onVis = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [showAll]);
 
   const decide = async (id: number, approved: boolean) => {

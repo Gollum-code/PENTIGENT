@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { api, apiText, useToast } from "@/lib/store";
+import { api, apiText, pageVisible, useToast } from "@/lib/store";
 import Nav from "@/components/Nav";
 
 export default function TaskDetail({ id }: { id: string }) {
@@ -46,8 +46,14 @@ export default function TaskDetail({ id }: { id: string }) {
 
   useEffect(() => {
     load(true);
-    // 状态/图用慢轮询兜底（SSE 负责实时活动流）
-    const iv = setInterval(() => load(false), 5000);
+    // 状态/图用慢轮询兜底（SSE 负责实时活动流）；后台标签页暂停，切回时立即刷一次
+    const iv = setInterval(() => {
+      if (pageVisible()) load(false);
+    }, 5000);
+    const onVis = () => {
+      if (document.visibilityState === "visible") load(false);
+    };
+    document.addEventListener("visibilitychange", onVis);
 
     // SSE 活动流：带指数退避自动重连。
     // EventSource 不能设置 Authorization 头，但同源 HttpOnly cookie 会自动携带。
@@ -95,6 +101,7 @@ export default function TaskDetail({ id }: { id: string }) {
     return () => {
       closed = true;
       clearInterval(iv);
+      document.removeEventListener("visibilitychange", onVis);
       src?.close();
       if (timer) window.clearTimeout(timer);
     };

@@ -136,10 +136,19 @@ func (w *Worker) Run(ctx context.Context, taskID, explorationID int64, intent *N
 				Content:    resultText,
 			})
 		}
-		time.Sleep(100 * time.Millisecond) // 防止 mock 自循环太快
+		time.Sleep(ifMockSleep())
 	}
 
 	return res
+}
+
+// ifMockSleep mock provider 是自循环脚本，轮次之间太快会打满 CPU；
+// 真实 LLM 本身就有网络往返，不再额外 sleep。
+func ifMockSleep() time.Duration {
+	if CurrentProvider().Name() == "mock" {
+		return 100 * time.Millisecond
+	}
+	return 0
 }
 
 func (w *Worker) logLLMActivity(ctx context.Context, taskID, explorationID, nodeID int64, resp ChatResponse) {

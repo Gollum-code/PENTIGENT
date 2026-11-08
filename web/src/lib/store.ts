@@ -19,6 +19,12 @@ export const useAuth = create<State>((set) => ({
   setSetupNeeded: (v) => set({ setupNeeded: v }),
 }));
 
+// pageVisible 标签页是否可见。后台标签页无需继续轮询 —— 仪表盘/审批/统计这些
+// 每 3~5s 拉一次的定时器在切走时是无谓的请求与耗电。
+export function pageVisible(): boolean {
+  return typeof document === "undefined" || document.visibilityState === "visible";
+}
+
 // ---- 全局错误提示（toast） ----
 
 export const useToast = create<{

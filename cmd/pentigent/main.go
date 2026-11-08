@@ -101,6 +101,9 @@ func main() {
 	if cfg.Tools.BashTimeoutSec > 0 {
 		agent.SetBashTimeoutSeconds(cfg.Tools.BashTimeoutSec)
 	}
+	if cfg.Tools.WebfetchTimeoutSec > 0 {
+		agent.SetWebfetchTimeoutSeconds(cfg.Tools.WebfetchTimeoutSec)
+	}
 
 	// 新漏洞 Webhook 推送（异步，失败只记日志，不影响任务）
 	if cfg.Notify.WebhookURL != "" {

@@ -311,6 +311,21 @@ PENTIGENT/
 | 报告按任务收敛 | 任务报告/覆盖度改走"探索锚点"只取本任务资产，不再把全局资产库其它任务的资产混进报告 |
 | 资产入库范围校验 | `insert_assets` 逐资产校验 host 是否在授权范围内（`Guard.ScopeAllows`），范围外资产不入库：资产图是全局真值库，否则等于让 LLM 越权建档并污染其它任务 |
 
+### 性能与代码卫生（第 4 轮）
+
+| 项 | 说明 |
+|---|---|
+| 静态资源 gzip + 缓存头 | 单二进制直连部署时补上反代常做的事：文本资源按 `Accept-Encoding` gzip（JS 包约小 70%）；`_next/static/` 内容哈希资源 `immutable` 长缓存、HTML `no-cache` |
+| SPA 兜底 301 bug | 旧实现把兜底 URL 改写成 `/index.html`，`http.FileServer` 会做 301 规范化，导致 `/tasks/999/`（id 超出预生成范围）被弹回首页；改为按原始 URL 返回 `index.html` |
+| 路由表缓存 + 快路径 | 路由表改为启动时构建一次（原每个请求重复构建 ~40 条）；`matchPath` 对无参数路由走字符串比较，不再每条路由都 Split 分配 |
+| guard 正则预编译 | `extractHosts` 的 5 条正则提升为包级变量（原先每次 bash/webfetch 调用都重新 `MustCompile`） |
+| 空 frontier 不派发 | 没有 open intent 时 `dispatchAsync` 直接返回，避免收敛期反复做 `BEGIN + SELECT FOR UPDATE + ROLLBACK` 的空事务 |
+| webfetch 超时可配置 | 新增 `tools.webfetch_timeout_sec`（默认 20s，环境变量 `PENTIGENT_WEBFETCH_TIMEOUT_SEC`），原来只有 bash 超时可配 |
+| 前端轮询后台暂停 | 仪表盘/审批/统计/任务详情的定时轮询在标签页隐藏时跳过，切回立即刷新一次 |
+| TypeScript 严格模式 | `tsconfig` 开启 `strict: true`（实测 0 报错），前端类型检查纳入 CI |
+| API 文档版本 | OpenAPI 的 `info.version` 改用构建注入的 `server.Version`，与 `/api/health` 一致 |
+| 死代码清理 | 删除未被引用的 `TaskDetailRoute.tsx` / `FindingDetailRoute.tsx` |
+
 ## 12. 与 PENTIGENT 的差异（有意简化）
 
 | 维度 | PENTIGENT | 本 MVP |

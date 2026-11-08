@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { api } from "@/lib/store";
+import { api, pageVisible } from "@/lib/store";
 
 function Card({ label, value, color }: { label: string; value: any; color?: string }) {
   return (
@@ -20,7 +20,10 @@ export default function StatsBar() {
         .then(setS)
         .catch(() => {});
     load();
-    const iv = setInterval(load, 5000);
+    // 后台标签页暂停轮询
+    const iv = setInterval(() => {
+      if (pageVisible()) load();
+    }, 5000);
     return () => clearInterval(iv);
   }, []);
 
